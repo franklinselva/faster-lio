@@ -1,6 +1,6 @@
 #include <gtest/gtest.h>
 #include "ivox3d/ivox3d.h"
-#include "common_lib.h"
+#include "faster_lio/common_lib.h"
 
 using namespace faster_lio;
 

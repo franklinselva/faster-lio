@@ -1,4 +1,4 @@
-#include "imu_processing.h"
+#include "faster_lio/imu_processing.h"
 
 namespace faster_lio {
 
@@ -30,7 +30,7 @@ void ImuProcess::Reset() {
     v_imu_.clear();
     IMUpose_.clear();
     last_imu_ = std::make_shared<IMUData>();
-    cur_pcl_un_.reset(new PointCloudType());
+    cur_pcl_un_ = std::make_shared<PointCloudType>();
 }
 
 void ImuProcess::SetExtrinsic(const common::V3D &transl, const common::M3D &rot) {
@@ -112,6 +112,7 @@ void ImuProcess::UndistortPcl(const common::MeasureGroup &meas, esekfom::esekf<s
     /*** Initialize IMU pose ***/
     state_ikfom imu_state = kf_state.get_x();
     IMUpose_.clear();
+    IMUpose_.reserve(v_imu.size());
     IMUpose_.push_back(common::set_pose6d(0.0, acc_s_last_, angvel_last_, imu_state.vel, imu_state.pos,
                                           imu_state.rot.toRotationMatrix()));
 

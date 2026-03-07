@@ -1,5 +1,5 @@
 #include <gtest/gtest.h>
-#include "laser_mapping.h"
+#include "faster_lio/laser_mapping.h"
 
 using namespace faster_lio;
 

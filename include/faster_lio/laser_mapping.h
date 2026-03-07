@@ -2,13 +2,11 @@
 #define FASTER_LIO_LASER_MAPPING_H
 
 #include <pcl/filters/voxel_grid.h>
-#include <condition_variable>
-#include <thread>
+#include <mutex>
 
-#include "imu_processing.h"
+#include "faster_lio/imu_processing.h"
 #include "ivox3d/ivox3d.h"
-#include "options.h"
-#include "pointcloud_preprocess.h"
+#include "faster_lio/pointcloud_preprocess.h"
 
 namespace faster_lio {
 
@@ -92,9 +90,9 @@ class LaserMapping {
     std::string map_file_path_;
 
     /// point clouds data
-    CloudPtr scan_undistort_{new PointCloudType()};   // scan after undistortion
-    CloudPtr scan_down_body_{new PointCloudType()};   // downsampled scan in body
-    CloudPtr scan_down_world_{new PointCloudType()};  // downsampled scan in world
+    CloudPtr scan_undistort_ = std::make_shared<PointCloudType>();   // scan after undistortion
+    CloudPtr scan_down_body_ = std::make_shared<PointCloudType>();   // downsampled scan in body
+    CloudPtr scan_down_world_ = std::make_shared<PointCloudType>();  // downsampled scan in world
     std::vector<PointVector> nearest_points_;         // nearest points of current scan
     common::VV4F corr_pts_;                           // inlier pts
     common::VV4F corr_norm_;                          // inlier plane norms
@@ -110,6 +108,8 @@ class LaserMapping {
     std::deque<IMUData::Ptr> imu_buffer_;
 
     /// options
+    int num_max_iterations_ = 4;
+    float esti_plane_threshold_ = 0.1f;
     bool time_sync_en_ = false;
     double timediff_lidar_wrt_imu_ = 0.0;
     double last_timestamp_lidar_ = 0;
@@ -145,7 +145,7 @@ class LaserMapping {
     int pcd_save_interval_ = -1;
     bool path_save_en_ = false;
 
-    PointCloudType::Ptr pcl_wait_save_{new PointCloudType()};  // debug save
+    PointCloudType::Ptr pcl_wait_save_ = std::make_shared<PointCloudType>();  // debug save
     std::vector<PoseStamped> path_;
     PoseStamped msg_body_pose_;
 };

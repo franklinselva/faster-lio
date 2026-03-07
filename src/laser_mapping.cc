@@ -3,8 +3,8 @@
 #include <fstream>
 #include "faster_lio/compat.h"
 
-#include "laser_mapping.h"
-#include "utils.h"
+#include "faster_lio/laser_mapping.h"
+#include "faster_lio/utils.h"
 
 namespace faster_lio {
 
@@ -22,7 +22,7 @@ bool LaserMapping::Init(const std::string &config_yaml) {
     kf_.init_dyn_share(
         get_f, df_dx, df_dw,
         [this](state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_data) { ObsModel(s, ekfom_data); },
-        options::NUM_MAX_ITERATIONS, epsi.data());
+        num_max_iterations_, epsi.data());
 
     if (std::is_same<IVoxType, IVox<3, IVoxNodeType::PHC, pcl::PointXYZI>>::value == true) {
         spdlog::info("Using PHC iVox");
@@ -47,8 +47,10 @@ bool LaserMapping::LoadParamsFromYAML(const std::string &yaml_file) {
         dense_pub_en_ = yaml["output"]["dense_en"].as<bool>();
         path_save_en_ = yaml["output"]["path_save_en"].as<bool>();
 
-        options::NUM_MAX_ITERATIONS = yaml["max_iteration"].as<int>();
-        options::ESTI_PLANE_THRESHOLD = yaml["esti_plane_threshold"].as<float>();
+        num_max_iterations_ = yaml["max_iteration"].as<int>();
+        esti_plane_threshold_ = yaml["esti_plane_threshold"].as<float>();
+        options::NUM_MAX_ITERATIONS = num_max_iterations_;
+        options::ESTI_PLANE_THRESHOLD = esti_plane_threshold_;
         time_sync_en_ = yaml["common"]["time_sync_en"].as<bool>();
 
         filter_size_surf_min = yaml["filter_size_surf"].as<float>();
@@ -59,12 +61,12 @@ bool LaserMapping::LoadParamsFromYAML(const std::string &yaml_file) {
         acc_cov = yaml["mapping"]["acc_cov"].as<float>();
         b_gyr_cov = yaml["mapping"]["b_gyr_cov"].as<float>();
         b_acc_cov = yaml["mapping"]["b_acc_cov"].as<float>();
-        preprocess_->Blind() = yaml["preprocess"]["blind"].as<double>();
-        preprocess_->TimeScale() = yaml["preprocess"]["time_scale"].as<double>();
+        preprocess_->SetBlind(yaml["preprocess"]["blind"].as<double>());
+        preprocess_->SetTimeScale(yaml["preprocess"]["time_scale"].as<float>());
         lidar_type = yaml["preprocess"]["lidar_type"].as<int>();
-        preprocess_->NumScans() = yaml["preprocess"]["scan_line"].as<int>();
-        preprocess_->PointFilterNum() = yaml["point_filter_num"].as<int>();
-        preprocess_->FeatureEnabled() = yaml["feature_extract_enable"].as<bool>();
+        preprocess_->SetNumScans(yaml["preprocess"]["scan_line"].as<int>());
+        preprocess_->SetPointFilterNum(yaml["point_filter_num"].as<int>());
+        preprocess_->SetFeatureEnabled(yaml["feature_extract_enable"].as<bool>());
         extrinsic_est_en_ = yaml["mapping"]["extrinsic_est_en"].as<bool>();
         pcd_save_en_ = yaml["pcd_save"]["pcd_save_en"].as<bool>();
         pcd_save_interval_ = yaml["pcd_save"]["interval"].as<int>();
@@ -130,8 +132,8 @@ bool LaserMapping::LoadParamsFromYAML(const std::string &yaml_file) {
 }
 
 LaserMapping::LaserMapping() {
-    preprocess_.reset(new PointCloudPreprocess());
-    p_imu_.reset(new ImuProcess());
+    preprocess_ = std::make_shared<PointCloudPreprocess>();
+    p_imu_ = std::make_shared<ImuProcess>();
 }
 
 void LaserMapping::AddIMU(const IMUData &imu) {
@@ -244,11 +246,11 @@ void LaserMapping::AddPointCloud(const pcl::PointCloud<PointT> &cloud, double ti
 }
 
 // Explicit template instantiations
-template void LaserMapping::AddPointCloud(const pcl::PointCloud<velodyne_ros::Point> &, double);
-template void LaserMapping::AddPointCloud(const pcl::PointCloud<ouster_ros::Point> &, double);
-template void LaserMapping::AddPointCloud(const pcl::PointCloud<hesai_ros::Point> &, double);
-template void LaserMapping::AddPointCloud(const pcl::PointCloud<robosense_ros::Point> &, double);
-template void LaserMapping::AddPointCloud(const pcl::PointCloud<livox_ros::Point> &, double);
+template void LaserMapping::AddPointCloud(const pcl::PointCloud<velodyne_pcl::Point> &, double);
+template void LaserMapping::AddPointCloud(const pcl::PointCloud<ouster_pcl::Point> &, double);
+template void LaserMapping::AddPointCloud(const pcl::PointCloud<hesai_pcl::Point> &, double);
+template void LaserMapping::AddPointCloud(const pcl::PointCloud<robosense_pcl::Point> &, double);
+template void LaserMapping::AddPointCloud(const pcl::PointCloud<livox_pcl::Point> &, double);
 
 PoseStamped LaserMapping::GetCurrentPose() const {
     return msg_body_pose_;
@@ -315,8 +317,9 @@ void LaserMapping::Run() {
     }
     scan_down_world_->resize(cur_pts);
     nearest_points_.resize(cur_pts);
-    residuals_.resize(cur_pts, 0);
-    point_selected_surf_.resize(cur_pts, true);
+    // No value-init needed: ObsModel writes every element of residuals_ and point_selected_surf_
+    residuals_.resize(cur_pts);
+    point_selected_surf_.resize(cur_pts);
     plane_coef_.resize(cur_pts, common::V4F::Zero());
 
     // ICP and iterated Kalman filter update
@@ -419,6 +422,11 @@ void LaserMapping::MapIncremental() {
         index[i] = i;
     }
 
+    // Two-pass approach to avoid data race on shared vectors:
+    // Pass 1 (parallel): classify each point into ADD / NO_DOWNSAMPLE / SKIP
+    enum PointAction : uint8_t { SKIP = 0, ADD = 1, NO_DOWNSAMPLE = 2 };
+    std::vector<uint8_t> actions(cur_pts, SKIP);
+
     faster_lio::compat::for_each(faster_lio::compat::unseq, index.begin(), index.end(), [&](const size_t &i) {
         /* transform to world frame */
         PointBodyToWorld(&(scan_down_body_->points[i]), &(scan_down_world_->points[i]));
@@ -436,7 +444,7 @@ void LaserMapping::MapIncremental() {
             if (fabs(dis_2_center.x()) > 0.5 * filter_size_map_min_ &&
                 fabs(dis_2_center.y()) > 0.5 * filter_size_map_min_ &&
                 fabs(dis_2_center.z()) > 0.5 * filter_size_map_min_) {
-                point_no_need_downsample.emplace_back(point_world);
+                actions[i] = NO_DOWNSAMPLE;
                 return;
             }
 
@@ -451,12 +459,21 @@ void LaserMapping::MapIncremental() {
                 }
             }
             if (need_add) {
-                points_to_add.emplace_back(point_world);
+                actions[i] = ADD;
             }
         } else {
-            points_to_add.emplace_back(point_world);
+            actions[i] = ADD;
         }
     });
+
+    // Pass 2 (sequential): collect classified points into the two vectors
+    for (int i = 0; i < cur_pts; ++i) {
+        if (actions[i] == ADD) {
+            points_to_add.emplace_back(scan_down_world_->points[i]);
+        } else if (actions[i] == NO_DOWNSAMPLE) {
+            point_no_need_downsample.emplace_back(scan_down_world_->points[i]);
+        }
+    }
 
     Timer::Evaluate(
         [&, this]() {
@@ -466,6 +483,10 @@ void LaserMapping::MapIncremental() {
         "    IVox Add Points");
 }
 
+// Thread safety: ObsModel uses par_unseq for read-only iVox queries and per-index
+// writes to nearest_points_[i], point_selected_surf_[i], plane_coef_[i], residuals_[i].
+// This is safe because Run() is sequential, and MapIncremental runs only after the
+// EKF update completes, so no concurrent mutation of the iVox map occurs.
 void LaserMapping::ObsModel(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_data) {
     int cnt_pts = scan_down_body_->size();
 
@@ -494,7 +515,7 @@ void LaserMapping::ObsModel(state_ikfom &s, esekfom::dyn_share_datastruct<double
                     point_selected_surf_[i] = points_near.size() >= options::MIN_NUM_MATCH_POINTS;
                     if (point_selected_surf_[i]) {
                         point_selected_surf_[i] =
-                            common::esti_plane(plane_coef_[i], points_near, options::ESTI_PLANE_THRESHOLD);
+                            common::esti_plane(plane_coef_[i], points_near, esti_plane_threshold_);
                     }
                 }
 

@@ -1,5 +1,5 @@
 #include <gtest/gtest.h>
-#include "pointcloud_preprocess.h"
+#include "faster_lio/pointcloud_preprocess.h"
 
 using namespace faster_lio;
 
@@ -14,15 +14,15 @@ class PointCloudPreprocessTest : public ::testing::Test {
 
 TEST_F(PointCloudPreprocessTest, VelodyneProcess) {
     preprocess_->SetLidarType(LidarType::VELO32);
-    preprocess_->Blind() = 0.5;
-    preprocess_->PointFilterNum() = 1;
-    preprocess_->NumScans() = 16;
-    preprocess_->TimeScale() = 1e-3;
+    preprocess_->SetBlind(0.5);
+    preprocess_->SetPointFilterNum(1);
+    preprocess_->SetNumScans(16);
+    preprocess_->SetTimeScale(1e-3);
 
     // Create synthetic velodyne cloud
-    pcl::PointCloud<velodyne_ros::Point> cloud;
+    pcl::PointCloud<velodyne_pcl::Point> cloud;
     for (int i = 0; i < 100; i++) {
-        velodyne_ros::Point p;
+        velodyne_pcl::Point p;
         p.x = static_cast<float>(i) + 1.0f;
         p.y = 1.0f;
         p.z = 1.0f;
@@ -45,12 +45,12 @@ TEST_F(PointCloudPreprocessTest, VelodyneProcess) {
 
 TEST_F(PointCloudPreprocessTest, OusterProcess) {
     preprocess_->SetLidarType(LidarType::OUST64);
-    preprocess_->Blind() = 0.5;
-    preprocess_->PointFilterNum() = 1;
+    preprocess_->SetBlind(0.5);
+    preprocess_->SetPointFilterNum(1);
 
-    pcl::PointCloud<ouster_ros::Point> cloud;
+    pcl::PointCloud<ouster_pcl::Point> cloud;
     for (int i = 0; i < 50; i++) {
-        ouster_ros::Point p;
+        ouster_pcl::Point p;
         p.x = static_cast<float>(i) + 1.0f;
         p.y = 0.5f;
         p.z = 0.5f;
@@ -71,9 +71,9 @@ TEST_F(PointCloudPreprocessTest, OusterProcess) {
 
 TEST_F(PointCloudPreprocessTest, LivoxCustomMsgProcess) {
     preprocess_->SetLidarType(LidarType::AVIA);
-    preprocess_->Blind() = 0.5;
-    preprocess_->PointFilterNum() = 1;
-    preprocess_->NumScans() = 6;
+    preprocess_->SetBlind(0.5);
+    preprocess_->SetPointFilterNum(1);
+    preprocess_->SetNumScans(6);
 
     LivoxCloud cloud;
     cloud.timebase = 100.0;
@@ -99,14 +99,14 @@ TEST_F(PointCloudPreprocessTest, LivoxCustomMsgProcess) {
 
 TEST_F(PointCloudPreprocessTest, BlindZoneFiltering) {
     preprocess_->SetLidarType(LidarType::VELO32);
-    preprocess_->Blind() = 2.0;  // large blind zone
-    preprocess_->PointFilterNum() = 1;
-    preprocess_->TimeScale() = 1e-3;
+    preprocess_->SetBlind(2.0);  // large blind zone
+    preprocess_->SetPointFilterNum(1);
+    preprocess_->SetTimeScale(1e-3);
 
-    pcl::PointCloud<velodyne_ros::Point> cloud;
+    pcl::PointCloud<velodyne_pcl::Point> cloud;
     // Points within blind zone
     for (int i = 0; i < 10; i++) {
-        velodyne_ros::Point p;
+        velodyne_pcl::Point p;
         p.x = 0.1f;
         p.y = 0.1f;
         p.z = 0.1f;

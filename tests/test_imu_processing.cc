@@ -1,5 +1,5 @@
 #include <gtest/gtest.h>
-#include "imu_processing.h"
+#include "faster_lio/imu_processing.h"
 
 using namespace faster_lio;
 

@@ -6,8 +6,8 @@
 #include <sstream>
 
 #include "faster_lio/logger.h"
-#include "laser_mapping.h"
-#include "utils.h"
+#include "faster_lio/laser_mapping.h"
+#include "faster_lio/utils.h"
 
 /// run faster-LIO in offline mode: reads PCD files + IMU CSV, feeds data through the API
 

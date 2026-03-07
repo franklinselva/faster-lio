@@ -13,8 +13,8 @@
 // ArpackSupport removed - not needed and causes build issues on some Eigen versions
 
 #include "faster_lio/types.h"
-#include "options.h"
-#include "so3_math.h"
+#include "faster_lio/options.h"
+#include "faster_lio/so3_math.h"
 
 using PointType = pcl::PointXYZINormal;
 using PointCloudType = pcl::PointCloud<PointType>;
@@ -70,14 +70,14 @@ using VV4D = std::vector<V4D, Eigen::aligned_allocator<V4D>>;
 using VV5F = std::vector<V5F, Eigen::aligned_allocator<V5F>>;
 using VV5D = std::vector<V5D, Eigen::aligned_allocator<V5D>>;
 
-const M3D Eye3d = M3D::Identity();
-const M3F Eye3f = M3F::Identity();
-const V3D Zero3d(0, 0, 0);
-const V3F Zero3f(0, 0, 0);
+inline const M3D Eye3d = M3D::Identity();
+inline const M3F Eye3f = M3F::Identity();
+inline const V3D Zero3d(0, 0, 0);
+inline const V3F Zero3f(0, 0, 0);
 
 /// sync imu and lidar measurements
 struct MeasureGroup {
-    MeasureGroup() { this->lidar_.reset(new PointCloudType()); };
+    MeasureGroup() { this->lidar_ = std::make_shared<PointCloudType>(); };
 
     double lidar_bag_time_ = 0;
     double lidar_end_time_ = 0;
@@ -173,7 +173,8 @@ inline bool esti_plane(Eigen::Matrix<T, 4, 1> &pca_result, const PointVector &po
             A(j, 2) = point[j].z;
         }
 
-        normvec = A.colPivHouseholderQr().solve(b);
+        // householderQr avoids pivoting overhead; the 5x3 system is well-conditioned
+        normvec = A.householderQr().solve(b);
     } else {
         Eigen::MatrixXd A(point.size(), 3);
         Eigen::VectorXd b(point.size(), 1);

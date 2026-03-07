@@ -5,6 +5,8 @@
 #ifndef FAST_LIO_OPTIONS_H
 #define FAST_LIO_OPTIONS_H
 
+#include <atomic>
+
 namespace faster_lio::options {
 
 /// fixed params
@@ -14,10 +16,10 @@ constexpr int PUBFRAME_PERIOD = 20;
 constexpr int NUM_MATCH_POINTS = 5;      // required matched points in current
 constexpr int MIN_NUM_MATCH_POINTS = 3;  // minimum matched points in current
 
-/// configurable params
+/// configurable params (kept as globals for backward compatibility; also stored in LaserMapping)
 extern int NUM_MAX_ITERATIONS;      // max iterations of ekf
 extern float ESTI_PLANE_THRESHOLD;  // plane threshold
-extern bool FLAG_EXIT;              // flag for exitting
+extern std::atomic<bool> FLAG_EXIT; // flag for exiting (atomic for signal-handler safety)
 
 }  // namespace faster_lio::options
 

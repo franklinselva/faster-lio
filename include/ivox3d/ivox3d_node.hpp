@@ -141,65 +141,18 @@ template <typename PointT, int dim>
 int IVoxNode<PointT, dim>::KNNPointByCondition(std::vector<DistPoint>& dis_points, const PointT& point, const int& K,
                                                const double& max_range) {
     std::size_t old_size = dis_points.size();
-// #define INNER_TIMER
-#ifdef INNER_TIMER
-    static std::unordered_map<std::string, std::vector<int64_t>> stats;
-    if (stats.empty()) {
-        stats["dis"] = std::vector<int64_t>();
-        stats["put"] = std::vector<int64_t>();
-        stats["nth"] = std::vector<int64_t>();
-    }
-#endif
 
     for (const auto& pt : points_) {
-#ifdef INNER_TIMER
-        auto t0 = std::chrono::high_resolution_clock::now();
-#endif
         double d = distance2(pt, point);
-#ifdef INNER_TIMER
-        auto t1 = std::chrono::high_resolution_clock::now();
-#endif
         if (d < max_range * max_range) {
             dis_points.emplace_back(DistPoint(d, this, &pt - points_.data()));
         }
-#ifdef INNER_TIMER
-        auto t2 = std::chrono::high_resolution_clock::now();
-
-        auto dis = std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count();
-        stats["dis"].emplace_back(dis);
-        auto put = std::chrono::duration_cast<std::chrono::nanoseconds>(t2 - t1).count();
-        stats["put"].emplace_back(put);
-#endif
     }
 
-#ifdef INNER_TIMER
-    auto t1 = std::chrono::high_resolution_clock::now();
-#endif
-    // sort by distance
-    if (old_size + K >= dis_points.size()) {
-    } else {
+    if (old_size + K < dis_points.size()) {
         std::nth_element(dis_points.begin() + old_size, dis_points.begin() + old_size + K - 1, dis_points.end());
         dis_points.resize(old_size + K);
     }
-
-#ifdef INNER_TIMER
-    auto t2 = std::chrono::high_resolution_clock::now();
-    auto nth = std::chrono::duration_cast<std::chrono::nanoseconds>(t2 - t1).count();
-    stats["nth"].emplace_back(nth);
-
-    constexpr int STAT_PERIOD = 100000;
-    if (!stats["nth"].empty() && stats["nth"].size() % STAT_PERIOD == 0) {
-        for (auto& it : stats) {
-            const std::string& key = it.first;
-            std::vector<int64_t>& stat = it.second;
-            int64_t sum_ = std::accumulate(stat.begin(), stat.end(), 0);
-            int64_t num_ = stat.size();
-            stat.clear();
-            std::cout << "inner_" << key << "(ns): sum=" << sum_ << " num=" << num_ << " ave=" << 1.0 * sum_ / num_
-                      << " ave*n=" << 1.0 * sum_ / STAT_PERIOD << std::endl;
-        }
-    }
-#endif
 
     return dis_points.size();
 }

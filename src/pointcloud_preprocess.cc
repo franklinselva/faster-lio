@@ -1,4 +1,4 @@
-#include "pointcloud_preprocess.h"
+#include "faster_lio/pointcloud_preprocess.h"
 
 #include <spdlog/spdlog.h>
 #include "faster_lio/compat.h"
@@ -16,27 +16,27 @@ void PointCloudPreprocess::Process(const LivoxCloud &msg, PointCloudType::Ptr &p
     *pcl_out = cloud_out_;
 }
 
-void PointCloudPreprocess::Process(const pcl::PointCloud<velodyne_ros::Point> &msg, PointCloudType::Ptr &pcl_out) {
+void PointCloudPreprocess::Process(const pcl::PointCloud<velodyne_pcl::Point> &msg, PointCloudType::Ptr &pcl_out) {
     VelodyneHandler(msg);
     *pcl_out = cloud_out_;
 }
 
-void PointCloudPreprocess::Process(const pcl::PointCloud<ouster_ros::Point> &msg, PointCloudType::Ptr &pcl_out) {
+void PointCloudPreprocess::Process(const pcl::PointCloud<ouster_pcl::Point> &msg, PointCloudType::Ptr &pcl_out) {
     Oust64Handler(msg);
     *pcl_out = cloud_out_;
 }
 
-void PointCloudPreprocess::Process(const pcl::PointCloud<hesai_ros::Point> &msg, PointCloudType::Ptr &pcl_out) {
+void PointCloudPreprocess::Process(const pcl::PointCloud<hesai_pcl::Point> &msg, PointCloudType::Ptr &pcl_out) {
     HesaiHandler(msg);
     *pcl_out = cloud_out_;
 }
 
-void PointCloudPreprocess::Process(const pcl::PointCloud<robosense_ros::Point> &msg, PointCloudType::Ptr &pcl_out) {
+void PointCloudPreprocess::Process(const pcl::PointCloud<robosense_pcl::Point> &msg, PointCloudType::Ptr &pcl_out) {
     RobosenseHandler(msg);
     *pcl_out = cloud_out_;
 }
 
-void PointCloudPreprocess::Process(const pcl::PointCloud<livox_ros::Point> &msg, PointCloudType::Ptr &pcl_out) {
+void PointCloudPreprocess::Process(const pcl::PointCloud<livox_pcl::Point> &msg, PointCloudType::Ptr &pcl_out) {
     LivoxHandler(msg);
     *pcl_out = cloud_out_;
 }
@@ -84,7 +84,7 @@ void PointCloudPreprocess::AviaHandler(const LivoxCloud &msg) {
     }
 }
 
-void PointCloudPreprocess::Oust64Handler(const pcl::PointCloud<ouster_ros::Point> &pl_orig) {
+void PointCloudPreprocess::Oust64Handler(const pcl::PointCloud<ouster_pcl::Point> &pl_orig) {
     cloud_out_.clear();
     cloud_full_.clear();
     int plsize = pl_orig.size();
@@ -112,7 +112,7 @@ void PointCloudPreprocess::Oust64Handler(const pcl::PointCloud<ouster_ros::Point
     }
 }
 
-void PointCloudPreprocess::VelodyneHandler(const pcl::PointCloud<velodyne_ros::Point> &pl_orig) {
+void PointCloudPreprocess::VelodyneHandler(const pcl::PointCloud<velodyne_pcl::Point> &pl_orig) {
     cloud_out_.clear();
     cloud_full_.clear();
 
@@ -187,30 +187,29 @@ void PointCloudPreprocess::VelodyneHandler(const pcl::PointCloud<velodyne_ros::P
     }
 }
 
-void PointCloudPreprocess::HesaiHandler(const pcl::PointCloud<hesai_ros::Point> &pl_orig) {
+// Shared handler for lidar types with timestamp + ring fields (Hesai, Robosense)
+template <typename PointT>
+void PointCloudPreprocess::TimestampRingHandler(const pcl::PointCloud<PointT> &pl_orig) {
     cloud_out_.clear();
     cloud_full_.clear();
 
     int plsize = pl_orig.points.size();
     cloud_out_.reserve(plsize);
 
-    /*** These variables only works when no point timestamps given ***/
     double omega_l = 3.61;  // scan angular velocity
     std::vector<bool> is_first(num_scans_, true);
-    std::vector<double> yaw_fp(num_scans_, 0.0);    // yaw of first scan point
-    std::vector<float> yaw_last(num_scans_, 0.0);   // yaw of last scan point
-    std::vector<float> time_last(num_scans_, 0.0);  // last offset time
+    std::vector<double> yaw_fp(num_scans_, 0.0);
+    std::vector<float> yaw_last(num_scans_, 0.0);
+    std::vector<float> time_last(num_scans_, 0.0);
 
     if (pl_orig.points[plsize - 1].timestamp > 0) {
         given_offset_time_ = true;
     } else {
         given_offset_time_ = false;
         double yaw_first = atan2(pl_orig.points[0].y, pl_orig.points[0].x) * 57.29578;
-        double yaw_end = yaw_first;
         int layer_first = pl_orig.points[0].ring;
         for (uint i = plsize - 1; i > 0; i--) {
             if (pl_orig.points[i].ring == layer_first) {
-                yaw_end = atan2(pl_orig.points[i].y, pl_orig.points[i].x) * 57.29578;
                 break;
             }
         }
@@ -243,7 +242,6 @@ void PointCloudPreprocess::HesaiHandler(const pcl::PointCloud<hesai_ros::Point> 
                 continue;
             }
 
-            // compute offset time
             if (yaw_angle <= yaw_fp[layer]) {
                 added_pt.curvature = (yaw_fp[layer] - yaw_angle) / omega_l;
             } else {
@@ -264,83 +262,15 @@ void PointCloudPreprocess::HesaiHandler(const pcl::PointCloud<hesai_ros::Point> 
     }
 }
 
-void PointCloudPreprocess::RobosenseHandler(const pcl::PointCloud<robosense_ros::Point> &pl_orig) {
-    // Robosense uses same format as Hesai (timestamp + ring fields)
-    cloud_out_.clear();
-    cloud_full_.clear();
-
-    int plsize = pl_orig.points.size();
-    cloud_out_.reserve(plsize);
-
-    double omega_l = 3.61;
-    std::vector<bool> is_first(num_scans_, true);
-    std::vector<double> yaw_fp(num_scans_, 0.0);
-    std::vector<float> yaw_last(num_scans_, 0.0);
-    std::vector<float> time_last(num_scans_, 0.0);
-
-    if (pl_orig.points[plsize - 1].timestamp > 0) {
-        given_offset_time_ = true;
-    } else {
-        given_offset_time_ = false;
-        double yaw_first = atan2(pl_orig.points[0].y, pl_orig.points[0].x) * 57.29578;
-        double yaw_end = yaw_first;
-        int layer_first = pl_orig.points[0].ring;
-        for (uint i = plsize - 1; i > 0; i--) {
-            if (pl_orig.points[i].ring == layer_first) {
-                yaw_end = atan2(pl_orig.points[i].y, pl_orig.points[i].x) * 57.29578;
-                break;
-            }
-        }
-    }
-
-    double time_head = pl_orig.points[0].timestamp;
-
-    for (int i = 0; i < plsize; i++) {
-        PointType added_pt;
-
-        added_pt.normal_x = 0;
-        added_pt.normal_y = 0;
-        added_pt.normal_z = 0;
-        added_pt.x = pl_orig.points[i].x;
-        added_pt.y = pl_orig.points[i].y;
-        added_pt.z = pl_orig.points[i].z;
-        added_pt.intensity = pl_orig.points[i].intensity;
-        added_pt.curvature = (pl_orig.points[i].timestamp - time_head) * 1000.f;
-
-        if (!given_offset_time_) {
-            int layer = pl_orig.points[i].ring;
-            double yaw_angle = atan2(added_pt.y, added_pt.x) * 57.2957;
-
-            if (is_first[layer]) {
-                yaw_fp[layer] = yaw_angle;
-                is_first[layer] = false;
-                added_pt.curvature = 0.0;
-                yaw_last[layer] = yaw_angle;
-                time_last[layer] = added_pt.curvature;
-                continue;
-            }
-
-            if (yaw_angle <= yaw_fp[layer]) {
-                added_pt.curvature = (yaw_fp[layer] - yaw_angle) / omega_l;
-            } else {
-                added_pt.curvature = (yaw_fp[layer] - yaw_angle + 360.0) / omega_l;
-            }
-
-            if (added_pt.curvature < time_last[layer]) added_pt.curvature += 360.0 / omega_l;
-
-            yaw_last[layer] = yaw_angle;
-            time_last[layer] = added_pt.curvature;
-        }
-
-        if (i % point_filter_num_ == 0) {
-            if (added_pt.x * added_pt.x + added_pt.y * added_pt.y + added_pt.z * added_pt.z > (blind_ * blind_)) {
-                cloud_out_.points.push_back(added_pt);
-            }
-        }
-    }
+void PointCloudPreprocess::HesaiHandler(const pcl::PointCloud<hesai_pcl::Point> &pl_orig) {
+    TimestampRingHandler(pl_orig);
 }
 
-void PointCloudPreprocess::LivoxHandler(const pcl::PointCloud<livox_ros::Point> &pl_orig) {
+void PointCloudPreprocess::RobosenseHandler(const pcl::PointCloud<robosense_pcl::Point> &pl_orig) {
+    TimestampRingHandler(pl_orig);
+}
+
+void PointCloudPreprocess::LivoxHandler(const pcl::PointCloud<livox_pcl::Point> &pl_orig) {
     cloud_out_.clear();
     cloud_full_.clear();
 

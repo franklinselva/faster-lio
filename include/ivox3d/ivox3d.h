@@ -7,7 +7,6 @@
 
 #include <spdlog/spdlog.h>
 #include <list>
-#include <thread>
 #include "faster_lio/compat.h"
 
 #include "eigen_types.h"
@@ -137,28 +136,11 @@ bool IVox<dim, node_type, PointType>::GetClosestPoint(const PointType& pt, Point
 
     auto key = Pos2Grid(ToEigen<float, dim>(pt));
 
-// #define INNER_TIMER
-#ifdef INNER_TIMER
-    static std::unordered_map<std::string, std::vector<int64_t>> stats;
-    if (stats.empty()) {
-        stats["knn"] = std::vector<int64_t>();
-        stats["nth"] = std::vector<int64_t>();
-    }
-#endif
-
     for (const KeyType& delta : nearby_grids_) {
         auto dkey = key + delta;
         auto iter = grids_map_.find(dkey);
         if (iter != grids_map_.end()) {
-#ifdef INNER_TIMER
-            auto t1 = std::chrono::high_resolution_clock::now();
-#endif
-            auto tmp = iter->second->second.KNNPointByCondition(candidates, pt, max_num, max_range);
-#ifdef INNER_TIMER
-            auto t2 = std::chrono::high_resolution_clock::now();
-            auto knn = std::chrono::duration_cast<std::chrono::nanoseconds>(t2 - t1).count();
-            stats["knn"].emplace_back(knn);
-#endif
+            iter->second->second.KNNPointByCondition(candidates, pt, max_num, max_range);
         }
     }
 
@@ -166,35 +148,10 @@ bool IVox<dim, node_type, PointType>::GetClosestPoint(const PointType& pt, Point
         return false;
     }
 
-#ifdef INNER_TIMER
-    auto t1 = std::chrono::high_resolution_clock::now();
-#endif
-
-    if (candidates.size() <= max_num) {
-    } else {
+    if (candidates.size() > max_num) {
         std::nth_element(candidates.begin(), candidates.begin() + max_num - 1, candidates.end());
         candidates.resize(max_num);
     }
-    std::nth_element(candidates.begin(), candidates.begin(), candidates.end());
-
-#ifdef INNER_TIMER
-    auto t2 = std::chrono::high_resolution_clock::now();
-    auto nth = std::chrono::duration_cast<std::chrono::nanoseconds>(t2 - t1).count();
-    stats["nth"].emplace_back(nth);
-
-    constexpr int STAT_PERIOD = 100000;
-    if (!stats["nth"].empty() && stats["nth"].size() % STAT_PERIOD == 0) {
-        for (auto& it : stats) {
-            const std::string& key = it.first;
-            std::vector<int64_t>& stat = it.second;
-            int64_t sum_ = std::accumulate(stat.begin(), stat.end(), 0);
-            int64_t num_ = stat.size();
-            stat.clear();
-            std::cout << "inner_" << key << "(ns): sum=" << sum_ << " num=" << num_ << " ave=" << 1.0 * sum_ / num_
-                      << " ave*n=" << 1.0 * sum_ / STAT_PERIOD << std::endl;
-        }
-    }
-#endif
 
     closest_pt.clear();
     for (auto& it : candidates) {
@@ -255,7 +212,8 @@ bool IVox<dim, node_type, PointType>::GetClosestPoint(const PointVector& cloud, 
 
 template <int dim, IVoxNodeType node_type, typename PointType>
 void IVox<dim, node_type, PointType>::AddPoints(const PointVector& points_to_add) {
-    compat::for_each(compat::unseq, points_to_add.begin(), points_to_add.end(), [this](const auto& pt) {
+    // Plain for loop: mutates grids_map_ and grids_cache_ which are not thread-safe.
+    for (const auto& pt : points_to_add) {
         auto key = Pos2Grid(ToEigen<float, dim>(pt));
 
         auto iter = grids_map_.find(key);
@@ -277,7 +235,7 @@ void IVox<dim, node_type, PointType>::AddPoints(const PointVector& points_to_add
             grids_cache_.splice(grids_cache_.begin(), grids_cache_, iter->second);
             grids_map_[key] = grids_cache_.begin();
         }
-    });
+    }
 }
 
 template <int dim, IVoxNodeType node_type, typename PointType>

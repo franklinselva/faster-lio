@@ -6,10 +6,10 @@
 #include <deque>
 #include <fstream>
 
-#include "common_lib.h"
-#include "so3_math.h"
-#include "use-ikfom.hpp"
-#include "utils.h"
+#include "faster_lio/common_lib.h"
+#include "faster_lio/so3_math.h"
+#include "faster_lio/use-ikfom.hpp"
+#include "faster_lio/utils.h"
 
 namespace faster_lio {
 

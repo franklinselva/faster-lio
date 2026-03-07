@@ -5,9 +5,9 @@
 #include <pcl/point_types.h>
 #include <cstdint>
 
-#include "common_lib.h"
+#include "faster_lio/common_lib.h"
 
-namespace velodyne_ros {
+namespace velodyne_pcl {
 struct EIGEN_ALIGN16 Point {
     PCL_ADD_POINT4D;
     float intensity;
@@ -15,10 +15,10 @@ struct EIGEN_ALIGN16 Point {
     std::uint16_t ring;
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 };
-}  // namespace velodyne_ros
+}  // namespace velodyne_pcl
 
 // clang-format off
-POINT_CLOUD_REGISTER_POINT_STRUCT(velodyne_ros::Point,
+POINT_CLOUD_REGISTER_POINT_STRUCT(velodyne_pcl::Point,
                                 (float, x, x)
                                 (float, y, y)
                                 (float, z, z)
@@ -28,7 +28,7 @@ POINT_CLOUD_REGISTER_POINT_STRUCT(velodyne_ros::Point,
 )
 // clang-format on
 
-namespace ouster_ros {
+namespace ouster_pcl {
 struct EIGEN_ALIGN16 Point {
     PCL_ADD_POINT4D;
     float intensity;
@@ -39,10 +39,10 @@ struct EIGEN_ALIGN16 Point {
     uint32_t range;
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 };
-}  // namespace ouster_ros
+}  // namespace ouster_pcl
 
 // clang-format off
-POINT_CLOUD_REGISTER_POINT_STRUCT(ouster_ros::Point,
+POINT_CLOUD_REGISTER_POINT_STRUCT(ouster_pcl::Point,
                                 (float, x, x)
                                 (float, y, y)
                                 (float, z, z)
@@ -56,7 +56,7 @@ POINT_CLOUD_REGISTER_POINT_STRUCT(ouster_ros::Point,
 )
 // clang-format on
 
-namespace hesai_ros {
+namespace hesai_pcl {
 struct EIGEN_ALIGN16 Point {
     PCL_ADD_POINT4D;
     float intensity;
@@ -64,10 +64,10 @@ struct EIGEN_ALIGN16 Point {
     uint16_t ring;
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 };
-}  // namespace hesai_ros
+}  // namespace hesai_pcl
 
 // clang-format off
-POINT_CLOUD_REGISTER_POINT_STRUCT(hesai_ros::Point,
+POINT_CLOUD_REGISTER_POINT_STRUCT(hesai_pcl::Point,
                                 (float, x, x)
                                 (float, y, y)
                                 (float, z, z)
@@ -77,7 +77,7 @@ POINT_CLOUD_REGISTER_POINT_STRUCT(hesai_ros::Point,
 )
 // clang-format on
 
-namespace robosense_ros {
+namespace robosense_pcl {
 struct EIGEN_ALIGN16 Point {
     PCL_ADD_POINT4D;
     float intensity;
@@ -85,10 +85,10 @@ struct EIGEN_ALIGN16 Point {
     double timestamp;
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 };
-}  // namespace robosense_ros
+}  // namespace robosense_pcl
 
 // clang-format off
-POINT_CLOUD_REGISTER_POINT_STRUCT(robosense_ros::Point,
+POINT_CLOUD_REGISTER_POINT_STRUCT(robosense_pcl::Point,
                                 (float, x, x)
                                 (float, y, y)
                                 (float, z, z)
@@ -98,7 +98,7 @@ POINT_CLOUD_REGISTER_POINT_STRUCT(robosense_ros::Point,
 )
 // clang-format on
 
-namespace livox_ros {
+namespace livox_pcl {
 struct EIGEN_ALIGN16 Point {
     PCL_ADD_POINT4D;
     float intensity;
@@ -107,10 +107,10 @@ struct EIGEN_ALIGN16 Point {
     double timestamp;
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 };
-}  // namespace livox_ros
+}  // namespace livox_pcl
 
 // clang-format off
-POINT_CLOUD_REGISTER_POINT_STRUCT(livox_ros::Point,
+POINT_CLOUD_REGISTER_POINT_STRUCT(livox_pcl::Point,
                                 (float, x, x)
                                 (float, y, y)
                                 (float, z, z)
@@ -137,30 +137,37 @@ class PointCloudPreprocess {
     ~PointCloudPreprocess() = default;
 
     /// processors - typed PCL overloads (no ROS msg dependency)
-    void Process(const pcl::PointCloud<velodyne_ros::Point> &msg, PointCloudType::Ptr &pcl_out);
-    void Process(const pcl::PointCloud<ouster_ros::Point> &msg, PointCloudType::Ptr &pcl_out);
-    void Process(const pcl::PointCloud<hesai_ros::Point> &msg, PointCloudType::Ptr &pcl_out);
-    void Process(const pcl::PointCloud<robosense_ros::Point> &msg, PointCloudType::Ptr &pcl_out);
-    void Process(const pcl::PointCloud<livox_ros::Point> &msg, PointCloudType::Ptr &pcl_out);
+    void Process(const pcl::PointCloud<velodyne_pcl::Point> &msg, PointCloudType::Ptr &pcl_out);
+    void Process(const pcl::PointCloud<ouster_pcl::Point> &msg, PointCloudType::Ptr &pcl_out);
+    void Process(const pcl::PointCloud<hesai_pcl::Point> &msg, PointCloudType::Ptr &pcl_out);
+    void Process(const pcl::PointCloud<robosense_pcl::Point> &msg, PointCloudType::Ptr &pcl_out);
+    void Process(const pcl::PointCloud<livox_pcl::Point> &msg, PointCloudType::Ptr &pcl_out);
     void Process(const LivoxCloud &msg, PointCloudType::Ptr &pcl_out);
     void Set(LidarType lid_type, double bld, int pfilt_num);
 
     // accessors
-    double &Blind() { return blind_; }
-    int &NumScans() { return num_scans_; }
-    int &PointFilterNum() { return point_filter_num_; }
-    bool &FeatureEnabled() { return feature_enabled_; }
-    float &TimeScale() { return time_scale_; }
+    double Blind() const { return blind_; }
+    void SetBlind(double v) { blind_ = v; }
+    int NumScans() const { return num_scans_; }
+    void SetNumScans(int v) { num_scans_ = v; }
+    int PointFilterNum() const { return point_filter_num_; }
+    void SetPointFilterNum(int v) { point_filter_num_ = v; }
+    bool FeatureEnabled() const { return feature_enabled_; }
+    void SetFeatureEnabled(bool v) { feature_enabled_ = v; }
+    float TimeScale() const { return time_scale_; }
+    void SetTimeScale(float v) { time_scale_ = v; }
     LidarType GetLidarType() const { return lidar_type_; }
     void SetLidarType(LidarType lt) { lidar_type_ = lt; }
 
    private:
     void AviaHandler(const LivoxCloud &msg);
-    void Oust64Handler(const pcl::PointCloud<ouster_ros::Point> &msg);
-    void VelodyneHandler(const pcl::PointCloud<velodyne_ros::Point> &msg);
-    void HesaiHandler(const pcl::PointCloud<hesai_ros::Point> &msg);
-    void RobosenseHandler(const pcl::PointCloud<robosense_ros::Point> &msg);
-    void LivoxHandler(const pcl::PointCloud<livox_ros::Point> &msg);
+    void Oust64Handler(const pcl::PointCloud<ouster_pcl::Point> &msg);
+    void VelodyneHandler(const pcl::PointCloud<velodyne_pcl::Point> &msg);
+    template <typename PointT>
+    void TimestampRingHandler(const pcl::PointCloud<PointT> &pl_orig);
+    void HesaiHandler(const pcl::PointCloud<hesai_pcl::Point> &msg);
+    void RobosenseHandler(const pcl::PointCloud<robosense_pcl::Point> &msg);
+    void LivoxHandler(const pcl::PointCloud<livox_pcl::Point> &msg);
 
     PointCloudType cloud_full_, cloud_out_;
 
