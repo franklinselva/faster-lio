@@ -82,6 +82,9 @@ if(BUILD_EXAMPLES)
 
     add_executable(run_mapping examples/run_mapping.cc)
     target_link_libraries(run_mapping PRIVATE ${PROJECT_NAME} gflags)
+
+    add_executable(evaluate_lio examples/evaluate_lio.cc)
+    target_link_libraries(evaluate_lio PRIVATE ${PROJECT_NAME} gflags)
 endif()
 
 # Tests
