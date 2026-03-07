@@ -106,4 +106,11 @@ if(BUILD_TESTS)
     add_faster_lio_test(test_imu_processing test_imu_processing.cc)
     add_faster_lio_test(test_pointcloud_preprocess test_pointcloud_preprocess.cc)
     add_faster_lio_test(test_laser_mapping test_laser_mapping.cc)
+
+    # Edge case tests for production readiness
+    add_faster_lio_test(test_common_lib_edge_cases test_common_lib_edge_cases.cc)
+    add_faster_lio_test(test_ivox_edge_cases test_ivox_edge_cases.cc)
+    add_faster_lio_test(test_imu_processing_edge_cases test_imu_processing_edge_cases.cc)
+    add_faster_lio_test(test_pointcloud_preprocess_edge_cases test_pointcloud_preprocess_edge_cases.cc)
+    add_faster_lio_test(test_laser_mapping_edge_cases test_laser_mapping_edge_cases.cc)
 endif()

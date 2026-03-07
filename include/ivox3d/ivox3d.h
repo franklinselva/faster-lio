@@ -166,6 +166,15 @@ size_t IVox<dim, node_type, PointType>::NumValidGrids() const {
 }
 
 template <int dim, IVoxNodeType node_type, typename PointType>
+size_t IVox<dim, node_type, PointType>::NumPoints() const {
+    size_t total = 0;
+    for (const auto& it : grids_cache_) {
+        total += it.second.Size();
+    }
+    return total;
+}
+
+template <int dim, IVoxNodeType node_type, typename PointType>
 void IVox<dim, node_type, PointType>::GenerateNearbyGrids() {
     if (options_.nearby_type_ == NearbyType::CENTER) {
         nearby_grids_.emplace_back(KeyType::Zero());

@@ -46,6 +46,11 @@ void PointCloudPreprocess::AviaHandler(const LivoxCloud &msg) {
     cloud_full_.clear();
     int plsize = msg.point_num;
 
+    if (plsize < 2) {
+        spdlog::warn("AviaHandler: received point cloud with {} points, skipping", plsize);
+        return;
+    }
+
     cloud_out_.reserve(plsize);
     cloud_full_.resize(plsize);
 
@@ -88,6 +93,11 @@ void PointCloudPreprocess::Oust64Handler(const pcl::PointCloud<ouster_pcl::Point
     cloud_out_.clear();
     cloud_full_.clear();
     int plsize = pl_orig.size();
+    if (plsize == 0) {
+        spdlog::warn("Oust64Handler: received empty point cloud, skipping");
+        return;
+    }
+
     cloud_out_.reserve(plsize);
 
     for (int i = 0; i < pl_orig.points.size(); i++) {
@@ -117,6 +127,11 @@ void PointCloudPreprocess::VelodyneHandler(const pcl::PointCloud<velodyne_pcl::P
     cloud_full_.clear();
 
     int plsize = pl_orig.points.size();
+    if (plsize == 0) {
+        spdlog::warn("VelodyneHandler: received empty point cloud, skipping");
+        return;
+    }
+
     cloud_out_.reserve(plsize);
 
     /*** These variables only works when no point timestamps given ***/
@@ -194,6 +209,11 @@ void PointCloudPreprocess::TimestampRingHandler(const pcl::PointCloud<PointT> &p
     cloud_full_.clear();
 
     int plsize = pl_orig.points.size();
+    if (plsize == 0) {
+        spdlog::warn("TimestampRingHandler: received empty point cloud, skipping");
+        return;
+    }
+
     cloud_out_.reserve(plsize);
 
     double omega_l = 3.61;  // scan angular velocity
@@ -275,6 +295,11 @@ void PointCloudPreprocess::LivoxHandler(const pcl::PointCloud<livox_pcl::Point> 
     cloud_full_.clear();
 
     int plsize = pl_orig.points.size();
+
+    if (plsize < 2) {
+        spdlog::warn("LivoxHandler: received point cloud with {} points, skipping", plsize);
+        return;
+    }
 
     cloud_out_.reserve(plsize);
     cloud_full_.resize(plsize);
