@@ -1,15 +1,11 @@
 #ifndef FASTER_LIO_LASER_MAPPING_H
 #define FASTER_LIO_LASER_MAPPING_H
 
-#include <livox_ros_driver/CustomMsg.h>
-#include <nav_msgs/Path.h>
 #include <pcl/filters/voxel_grid.h>
-#include <ros/ros.h>
-#include <sensor_msgs/PointCloud2.h>
 #include <condition_variable>
 #include <thread>
 
-#include "imu_processing.hpp"
+#include "imu_processing.h"
 #include "ivox3d/ivox3d.h"
 #include "options.h"
 #include "pointcloud_preprocess.h"
@@ -31,41 +27,39 @@ class LaserMapping {
         scan_down_body_ = nullptr;
         scan_undistort_ = nullptr;
         scan_down_world_ = nullptr;
-        LOG(INFO) << "laser mapping deconstruct";
+        spdlog::debug("LaserMapping instance destroyed");
     }
 
-    /// init with ros
-    bool InitROS(ros::NodeHandle &nh);
-
-    /// init without ros
-    bool InitWithoutROS(const std::string &config_yaml);
+    /// init from yaml config (the only init path)
+    bool Init(const std::string &config_yaml);
 
     void Run();
 
-    // callbacks of lidar and imu
-    void StandardPCLCallBack(const sensor_msgs::PointCloud2::ConstPtr &msg);
-    void LivoxPCLCallBack(const livox_ros_driver::CustomMsg::ConstPtr &msg);
-    void IMUCallBack(const sensor_msgs::Imu::ConstPtr &msg_in);
+    // input API
+    void AddIMU(const IMUData &imu);
+    void AddPointCloud(const PointCloudType::Ptr &cloud, double timestamp);
+    void AddPointCloud(const LivoxCloud &cloud);
+
+    template <typename PointT>
+    void AddPointCloud(const pcl::PointCloud<PointT> &cloud, double timestamp);
+
+    // output API
+    PoseStamped GetCurrentPose() const;
+    Odometry GetCurrentOdometry() const;
+    const std::vector<PoseStamped> &GetTrajectory() const { return path_; }
 
     // sync lidar with imu
     bool SyncPackages();
 
-    /// interface of mtk, customized obseravtion model
+    /// interface of mtk, customized observation model
     void ObsModel(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_data);
 
-    ////////////////////////////// debug save / show ////////////////////////////////////////////////////////////////
-    void PublishPath(const ros::Publisher pub_path);
-    void PublishOdometry(const ros::Publisher &pub_odom_aft_mapped);
-    void PublishFrameWorld();
-    void PublishFrameBody(const ros::Publisher &pub_laser_cloud_body);
-    void PublishFrameEffectWorld(const ros::Publisher &pub_laser_cloud_effect_world);
     void Savetrajectory(const std::string &traj_file);
 
     void Finish();
 
    private:
-    template <typename T>
-    void SetPosestamp(T &out);
+    void SetPosestamp(PoseStamped &out);
 
     void PointBodyToWorld(PointType const *pi, PointType *const po);
     void PointBodyToWorld(const common::V3F &pi, PointType *const po);
@@ -73,12 +67,11 @@ class LaserMapping {
 
     void MapIncremental();
 
-    void SubAndPubToROS(ros::NodeHandle &nh);
-
-    bool LoadParams(ros::NodeHandle &nh);
     bool LoadParamsFromYAML(const std::string &yaml);
 
     void PrintState(const state_ikfom &s);
+
+    void SaveFrameWorld();
 
    private:
     /// modules
@@ -110,22 +103,11 @@ class LaserMapping {
     std::vector<char> point_selected_surf_;           // selected points
     common::VV4F plane_coef_;                         // plane coeffs
 
-    /// ros pub and sub stuffs
-    ros::Subscriber sub_pcl_;
-    ros::Subscriber sub_imu_;
-    ros::Publisher pub_laser_cloud_world_;
-    ros::Publisher pub_laser_cloud_body_;
-    ros::Publisher pub_laser_cloud_effect_world_;
-    ros::Publisher pub_odom_aft_mapped_;
-    ros::Publisher pub_path_;
-    std::string tf_imu_frame_;
-    std::string tf_world_frame_;
-
+    /// data buffers
     std::mutex mtx_buffer_;
     std::deque<double> time_buffer_;
     std::deque<PointCloudType::Ptr> lidar_buffer_;
-    std::deque<sensor_msgs::Imu::ConstPtr> imu_buffer_;
-    nav_msgs::Odometry odom_aft_mapped_;
+    std::deque<IMUData::Ptr> imu_buffer_;
 
     /// options
     bool time_sync_en_ = false;
@@ -136,7 +118,7 @@ class LaserMapping {
     double first_lidar_time_ = 0.0;
     bool lidar_pushed_ = false;
 
-    /// statistics and flags ///
+    /// statistics and flags
     int scan_count_ = 0;
     int publish_count_ = 0;
     bool flg_first_scan_ = true;
@@ -156,21 +138,16 @@ class LaserMapping {
     bool extrinsic_est_en_ = true;
 
     /////////////////////////  debug show / save /////////////////////////////////////////////////////////
-    bool run_in_offline_ = false;
     bool path_pub_en_ = true;
-    bool scan_pub_en_ = false;
     bool dense_pub_en_ = false;
-    bool scan_body_pub_en_ = false;
-    bool scan_effect_pub_en_ = false;
     bool pcd_save_en_ = false;
     bool runtime_pos_log_ = true;
     int pcd_save_interval_ = -1;
     bool path_save_en_ = false;
-    std::string dataset_;
 
     PointCloudType::Ptr pcl_wait_save_{new PointCloudType()};  // debug save
-    nav_msgs::Path path_;
-    geometry_msgs::PoseStamped msg_body_pose_;
+    std::vector<PoseStamped> path_;
+    PoseStamped msg_body_pose_;
 };
 
 }  // namespace faster_lio

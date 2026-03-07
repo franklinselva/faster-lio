@@ -5,10 +5,10 @@
 #ifndef FASTER_LIO_IVOX3D_H
 #define FASTER_LIO_IVOX3D_H
 
-#include <glog/logging.h>
-#include <execution>
+#include <spdlog/spdlog.h>
 #include <list>
 #include <thread>
+#include "faster_lio/compat.h"
 
 #include "eigen_types.h"
 #include "ivox3d_node.hpp"
@@ -230,7 +230,7 @@ void IVox<dim, node_type, PointType>::GenerateNearbyGrids() {
                          KeyType(-1, 1, 1),  KeyType(1, -1, 1),  KeyType(1, 1, -1),  KeyType(-1, -1, 1),
                          KeyType(-1, 1, -1), KeyType(1, -1, -1), KeyType(-1, -1, -1)};
     } else {
-        LOG(ERROR) << "Unknown nearby_type!";
+        spdlog::error("Invalid iVox nearby_type configuration");
     }
 }
 
@@ -242,7 +242,7 @@ bool IVox<dim, node_type, PointType>::GetClosestPoint(const PointVector& cloud, 
     }
     closest_cloud.resize(cloud.size());
 
-    std::for_each(std::execution::par_unseq, index.begin(), index.end(), [&cloud, &closest_cloud, this](size_t idx) {
+    compat::for_each(compat::par_unseq, index.begin(), index.end(), [&cloud, &closest_cloud, this](size_t idx) {
         PointType pt;
         if (GetClosestPoint(cloud[idx], pt)) {
             closest_cloud[idx] = pt;
@@ -255,7 +255,7 @@ bool IVox<dim, node_type, PointType>::GetClosestPoint(const PointVector& cloud, 
 
 template <int dim, IVoxNodeType node_type, typename PointType>
 void IVox<dim, node_type, PointType>::AddPoints(const PointVector& points_to_add) {
-    std::for_each(std::execution::unseq, points_to_add.begin(), points_to_add.end(), [this](const auto& pt) {
+    compat::for_each(compat::unseq, points_to_add.begin(), points_to_add.end(), [this](const auto& pt) {
         auto key = Pos2Grid(ToEigen<float, dim>(pt));
 
         auto iter = grids_map_.find(key);
@@ -299,7 +299,7 @@ std::vector<float> IVox<dim, node_type, PointType>::StatGridPoints() const {
     }
     float ave = float(sum) / num;
     float stddev = num > 1 ? sqrt((float(sum_square) - num * ave * ave) / (num - 1)) : 0;
-    return std::vector<float>{valid_num, ave, max, min, stddev};
+    return std::vector<float>{static_cast<float>(valid_num), ave, static_cast<float>(max), static_cast<float>(min), stddev};
 }
 
 }  // namespace faster_lio

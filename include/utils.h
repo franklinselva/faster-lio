@@ -5,7 +5,7 @@
 #ifndef FASTER_LIO_UTILS_H
 #define FASTER_LIO_UTILS_H
 
-#include <glog/logging.h>
+#include <spdlog/spdlog.h>
 #include <chrono>
 #include <fstream>
 #include <map>
@@ -49,24 +49,25 @@ class Timer {
 
     /// print the run time
     static void PrintAll() {
-        LOG(INFO) << ">>> ===== Printing run time =====";
+        spdlog::info("=== Timer Summary ===");
         for (const auto& r : records_) {
-            LOG(INFO) << "> [ " << r.first << " ] average time usage: "
-                      << std::accumulate(r.second.time_usage_in_ms_.begin(), r.second.time_usage_in_ms_.end(), 0.0) /
-                             double(r.second.time_usage_in_ms_.size())
-                      << " ms , called times: " << r.second.time_usage_in_ms_.size();
+            spdlog::info("  [{}] avg: {:.3f} ms, calls: {}",
+                         r.first,
+                         std::accumulate(r.second.time_usage_in_ms_.begin(), r.second.time_usage_in_ms_.end(), 0.0) /
+                             double(r.second.time_usage_in_ms_.size()),
+                         r.second.time_usage_in_ms_.size());
         }
-        LOG(INFO) << ">>> ===== Printing run time end =====";
+        spdlog::info("=== End Timer Summary ===");
     }
 
     /// dump to a log file
     static void DumpIntoFile(const std::string& file_name) {
         std::ofstream ofs(file_name, std::ios::out);
         if (!ofs.is_open()) {
-            LOG(ERROR) << "Failed to open file: " << file_name;
+            spdlog::error("Failed to open timer dump file: {}", file_name);
             return;
         } else {
-            LOG(INFO) << "Dump Time Records into file: " << file_name;
+            spdlog::info("Dumping timer records to: {}", file_name);
         }
 
         size_t max_length = 0;

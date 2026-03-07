@@ -7,7 +7,7 @@ the base of [FastLIO2](https://github.com/hku-mars/FAST_LIO) and provides about 
 almost 1k-2k hz for solid-state lidars and over 100 hz for a typical 32 lines spinning lidar. Please refer to [our paper](./doc/faster-lio.pdf)
 for more details.
 
-Below is the FPS tested with avia and velodyne 32 spinning lidar from FastLIO2 and [NCLT](http://robots.engin.umich.edu/nclt/), where "AMD" is tested with  AMD R7 5800X and "Intel" tested with Intel Xeon Gold 5218.
+Below is the FPS tested with avia and velodyne 32 spinning lidar from FastLIO2 and [NCLT](http://robots.engin.umich.edu/nclt/), where "AMD" is tested with AMD R7 5800X and "Intel" tested with Intel Xeon Gold 5218.
 
 <div  align="center">  
 <img src="https://github.com/gaoxiang12/faster-lio/blob/main/doc/fps-fasterlio.png" width = "1080" align=center />
@@ -18,44 +18,49 @@ Below is the FPS tested with avia and velodyne 32 spinning lidar from FastLIO2 a
 </div>
 
 # Quick Start
-## Docker 
+
+## Docker
+
 ```bash
-git clone 
+git clone
 cd faster-lio/docker
 docker-compose build
 docker-compose up
-```  
-Before entering `docker-compose up` command, you should enter `xhost +local:docker` in the local terminal to enable docker to communicate with Xserver on the host.  
+```
+
+Before entering `docker-compose up` command, you should enter `xhost +local:docker` in the local terminal to enable docker to communicate with Xserver on the host.
 
 update `bag` file path in `.env`, then run.
+
 ```bash
 catkin_make
 source devel/setup.bash
 roslaunch faster_lio mapping_avia.launch
 ```
+
 Open another terminal, then play `bag` file.
 
 ### issue
-`QStandardPaths: XDG_RUNTIME_DIR not set, defaulting to '/tmp/runtime-root'` 
+
+`QStandardPaths: XDG_RUNTIME_DIR not set, defaulting to '/tmp/runtime-root'`
 
 **Don't worry, it can run normally**. you can run `source /etc/profile&& source /opt/ros/noetic/setup.bash && source devel/setup.bash`, then `run roslaunch xxx`
-
 
 ## Dependency
 
 FasterLIO is tested in Ubuntu 18.04 and Ubuntu 20.04. Please install the following libraries before compilation.
 
 1. ROS (melodic or noetic)
-2. glog: ```sudo apt-get install libgoogle-glog-dev```
-3. eigen: ```sudo apt-get install libeigen3-dev```
-4. pcl: ```sudo apt-get install libpcl-dev```
-5. yaml-cpp: ```sudo apt-get install libyaml-cpp-dev```
+2. glog: `sudo apt-get install libgoogle-glog-dev`
+3. eigen: `sudo apt-get install libeigen3-dev`
+4. pcl: `sudo apt-get install libpcl-dev`
+5. yaml-cpp: `sudo apt-get install libyaml-cpp-dev`
 
 ## Compile
 
 FasterLIO can be compiled by plain cmake or catkin_make. In Ubuntu 20.04, the compile step is relatively simple.
 
-1. Plain cmake 
+1. Plain cmake
 
 Use the following commands to build FasterLIO:
 
@@ -67,7 +72,7 @@ make -j4
 ```
 
 Note: iVox type should be specified by cmake at compile time. By default we will use linear iVox.
-Use ```cmake .. -DWITH_IVOX_NODE_TYPE_PHC=ON``` to build the FasterLIO with PHC iVox.
+Use `cmake .. -DWITH_IVOX_NODE_TYPE_PHC=ON` to build the FasterLIO with PHC iVox.
 
 2. catkin_make
 
@@ -118,7 +123,7 @@ Download the avia/nclt bags in your computer:
 - [avia bags](https://drive.google.com/drive/folders/1YL5MQVYgAM8oAWUm7e3OGXZBPKkanmY1?usp=sharing)
 - [nclt bags](https://drive.google.com/drive/folders/1VBK5idI1oyW0GC_I_Hxh63aqam3nocNK)
 
-The link of the dataset is outdated.  Please use the NCLT bags in SAD datasets: 
+The link of the dataset is outdated. Please use the NCLT bags in SAD datasets:
 BaiduYun: https://pan.baidu.com/s/1ELOcF1UTKdfiKBAaXnE8sQ?pwd=feky access code: feky
 OneDrive：https://1drv.ms/u/s!AgNFVSzSYXMahcEZejoUwCaHRcactQ?e=YsOYy2
 
@@ -159,14 +164,14 @@ I0216 17:16:05.286808 26492 utils.h:54] > [ Undistort Pcl ] average time usage: 
 I0216 17:16:05.286816 26492 utils.h:59] >>> ===== Printing run time end =====
 ```
 
-Point clouds will be saved to PCD/scans.pcd by default. 
+Point clouds will be saved to PCD/scans.pcd by default.
 
-- Online mode 
- 
+- Online mode
+
 Online mode could be launched through rosrun/roslaunch/directly call. We use roslaunch as an example:
 
-1. Launch faster-lio: ```roslaunch faster_lio mapping_avia.launch``` This will give you a rviz window.
-2. Play the bags using ```rosbag play your bag file``` to see the online outputs.
+1. Launch faster-lio: `roslaunch faster_lio mapping_avia.launch` This will give you a rviz window.
+2. Play the bags using `rosbag play your bag file` to see the online outputs.
 
 # Acknowledgements
 
@@ -174,17 +179,16 @@ Online mode could be launched through rosrun/roslaunch/directly call. We use ros
 - Please cite our work if you are using FasterLIO in academic work. Bibtex is provided here (early-access version):
 
 ```
-@ARTICLE{9718203,  
-author={Bai, Chunge and Xiao, Tao and Chen, Yajie and Wang, Haoqian and Zhang, Fang and Gao, Xiang},  
-journal={IEEE Robotics and Automation Letters},   
-title={Faster-LIO: Lightweight Tightly Coupled Lidar-Inertial Odometry Using Parallel Sparse Incremental Voxels},   
-year={2022},  
-volume={7},  
-number={2},  
-pages={4861-4868},  
+@ARTICLE{9718203,
+author={Bai, Chunge and Xiao, Tao and Chen, Yajie and Wang, Haoqian and Zhang, Fang and Gao, Xiang},
+journal={IEEE Robotics and Automation Letters},
+title={Faster-LIO: Lightweight Tightly Coupled Lidar-Inertial Odometry Using Parallel Sparse Incremental Voxels},
+year={2022},
+volume={7},
+number={2},
+pages={4861-4868},
 doi={10.1109/LRA.2022.3152830}}
 ```
-
 
 - This work is supported by Idriver+ Technologies Co. Ltd.
 

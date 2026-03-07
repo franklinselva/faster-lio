@@ -1,9 +1,6 @@
 #ifndef FASTER_LIO_POINTCLOUD_PROCESSING_H
 #define FASTER_LIO_POINTCLOUD_PROCESSING_H
 
-#include <livox_ros_driver/CustomMsg.h>
-#include <pcl_conversions/pcl_conversions.h>
-
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
 #include <cstdint>
@@ -139,9 +136,13 @@ class PointCloudPreprocess {
     PointCloudPreprocess() = default;
     ~PointCloudPreprocess() = default;
 
-    /// processors
-    void Process(const livox_ros_driver::CustomMsg::ConstPtr &msg, PointCloudType::Ptr &pcl_out);
-    void Process(const sensor_msgs::PointCloud2::ConstPtr &msg, PointCloudType::Ptr &pcl_out);
+    /// processors - typed PCL overloads (no ROS msg dependency)
+    void Process(const pcl::PointCloud<velodyne_ros::Point> &msg, PointCloudType::Ptr &pcl_out);
+    void Process(const pcl::PointCloud<ouster_ros::Point> &msg, PointCloudType::Ptr &pcl_out);
+    void Process(const pcl::PointCloud<hesai_ros::Point> &msg, PointCloudType::Ptr &pcl_out);
+    void Process(const pcl::PointCloud<robosense_ros::Point> &msg, PointCloudType::Ptr &pcl_out);
+    void Process(const pcl::PointCloud<livox_ros::Point> &msg, PointCloudType::Ptr &pcl_out);
+    void Process(const LivoxCloud &msg, PointCloudType::Ptr &pcl_out);
     void Set(LidarType lid_type, double bld, int pfilt_num);
 
     // accessors
@@ -154,11 +155,12 @@ class PointCloudPreprocess {
     void SetLidarType(LidarType lt) { lidar_type_ = lt; }
 
    private:
-    void AviaHandler(const livox_ros_driver::CustomMsg::ConstPtr &msg);
-    void Oust64Handler(const sensor_msgs::PointCloud2::ConstPtr &msg);
-    void VelodyneHandler(const sensor_msgs::PointCloud2::ConstPtr &msg);
-    void HesaiHandler(const sensor_msgs::PointCloud2::ConstPtr &msg);
-    void LivoxHandler(const sensor_msgs::PointCloud2::ConstPtr &msg);
+    void AviaHandler(const LivoxCloud &msg);
+    void Oust64Handler(const pcl::PointCloud<ouster_ros::Point> &msg);
+    void VelodyneHandler(const pcl::PointCloud<velodyne_ros::Point> &msg);
+    void HesaiHandler(const pcl::PointCloud<hesai_ros::Point> &msg);
+    void RobosenseHandler(const pcl::PointCloud<robosense_ros::Point> &msg);
+    void LivoxHandler(const pcl::PointCloud<livox_ros::Point> &msg);
 
     PointCloudType cloud_full_, cloud_out_;
 
