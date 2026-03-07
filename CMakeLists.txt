@@ -20,10 +20,44 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(spdlog)
 
-find_package(TBB REQUIRED)
 find_package(Eigen3 REQUIRED)
 find_package(PCL 1.8 REQUIRED COMPONENTS common io filters)
 find_package(yaml-cpp REQUIRED)
+
+# yaml-cpp: older packages export 'yaml-cpp' target, newer export 'yaml-cpp::yaml-cpp'
+if(TARGET yaml-cpp::yaml-cpp)
+    set(YAML_CPP_TARGET yaml-cpp::yaml-cpp)
+elseif(TARGET yaml-cpp)
+    set(YAML_CPP_TARGET yaml-cpp)
+else()
+    message(FATAL_ERROR "yaml-cpp found but no known target (yaml-cpp or yaml-cpp::yaml-cpp)")
+endif()
+
+# TBB: required for iVox data structure, also enables C++17 parallel execution on Linux/GCC
+find_package(TBB REQUIRED)
+
+# Detect C++17 parallel execution support (requires <execution> header + TBB backend on GCC)
+include(CheckCXXSourceCompiles)
+set(CMAKE_REQUIRED_LIBRARIES TBB::tbb)
+set(CMAKE_REQUIRED_FLAGS "-std=c++17")
+check_cxx_source_compiles("
+    #include <execution>
+    #include <algorithm>
+    #include <vector>
+    int main() {
+        std::vector<int> v{1,2,3};
+        std::for_each(std::execution::par_unseq, v.begin(), v.end(), [](int&){});
+        return 0;
+    }
+" HAS_STD_EXECUTION)
+unset(CMAKE_REQUIRED_LIBRARIES)
+unset(CMAKE_REQUIRED_FLAGS)
+
+if(HAS_STD_EXECUTION)
+    message(STATUS "C++17 parallel execution policies: ENABLED (via TBB)")
+else()
+    message(STATUS "C++17 parallel execution policies: DISABLED (sequential fallback)")
+endif()
 
 # For ubuntu 18.04 with custom TBB path
 if(CUSTOM_TBB_DIR)
@@ -53,12 +87,16 @@ target_link_libraries(${PROJECT_NAME} PUBLIC
     ${PCL_LIBRARIES}
     TBB::tbb
     spdlog::spdlog
-    yaml-cpp::yaml-cpp
+    ${YAML_CPP_TARGET}
 )
 
 target_compile_definitions(${PROJECT_NAME} PUBLIC
     ROOT_DIR="${CMAKE_CURRENT_SOURCE_DIR}/"
 )
+
+if(HAS_STD_EXECUTION)
+    target_compile_definitions(${PROJECT_NAME} PUBLIC FASTER_LIO_HAS_STD_EXECUTION)
+endif()
 
 if(WITH_IVOX_NODE_TYPE_PHC)
     message(STATUS "Using IVOX_NODE_TYPE_PHC")

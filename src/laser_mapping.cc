@@ -1,6 +1,7 @@
 #include <pcl/io/pcd_io.h>
 #include <yaml-cpp/yaml.h>
 #include <fstream>
+#include <iomanip>
 #include "faster_lio/compat.h"
 
 #include "faster_lio/laser_mapping.h"

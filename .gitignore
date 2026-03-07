@@ -32,6 +32,7 @@
 *.app
 
 build/
+build-docker/
 *.pcd
 
 #Mac OS
