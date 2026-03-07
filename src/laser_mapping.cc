@@ -30,6 +30,7 @@ bool LaserMapping::Init(const std::string &config_yaml) {
         spdlog::info("Using default iVox");
     }
 
+    initialized_ = true;
     return true;
 }
 
@@ -41,7 +42,13 @@ bool LaserMapping::LoadParamsFromYAML(const std::string &yaml_file) {
     common::V3D lidar_T_wrt_IMU;
     common::M3D lidar_R_wrt_IMU;
 
-    auto yaml = YAML::LoadFile(yaml_file);
+    YAML::Node yaml;
+    try {
+        yaml = YAML::LoadFile(yaml_file);
+    } catch (const YAML::BadFile &e) {
+        spdlog::error("Failed to open YAML config file '{}': {}", yaml_file, e.what());
+        return false;
+    }
     try {
         path_pub_en_ = yaml["output"]["path_en"].as<bool>();
         dense_pub_en_ = yaml["output"]["dense_en"].as<bool>();
@@ -146,19 +153,20 @@ void LaserMapping::AddIMU(const IMUData &imu) {
 
     double timestamp = msg->timestamp;
 
-    mtx_buffer_.lock();
-    if (timestamp < last_timestamp_imu_) {
-        spdlog::warn("IMU timestamp went backwards (ts={}), clearing IMU buffer", timestamp);
-        imu_buffer_.clear();
-    }
+    {
+        std::lock_guard<std::mutex> lock(mtx_buffer_);
+        if (timestamp < last_timestamp_imu_) {
+            spdlog::warn("IMU timestamp went backwards (ts={}), clearing IMU buffer", timestamp);
+            imu_buffer_.clear();
+        }
 
-    last_timestamp_imu_ = timestamp;
-    imu_buffer_.emplace_back(msg);
-    mtx_buffer_.unlock();
+        last_timestamp_imu_ = timestamp;
+        imu_buffer_.emplace_back(msg);
+    }
 }
 
 void LaserMapping::AddPointCloud(const PointCloudType::Ptr &cloud, double timestamp) {
-    mtx_buffer_.lock();
+    std::lock_guard<std::mutex> lock(mtx_buffer_);
     Timer::Evaluate(
         [&, this]() {
             scan_count_++;
@@ -186,11 +194,10 @@ void LaserMapping::AddPointCloud(const PointCloudType::Ptr &cloud, double timest
             time_buffer_.emplace_back(timestamp);
         },
         "Preprocess (AddPointCloud)");
-    mtx_buffer_.unlock();
 }
 
 void LaserMapping::AddPointCloud(const LivoxCloud &cloud) {
-    mtx_buffer_.lock();
+    std::lock_guard<std::mutex> lock(mtx_buffer_);
     Timer::Evaluate(
         [&, this]() {
             scan_count_++;
@@ -215,18 +222,17 @@ void LaserMapping::AddPointCloud(const LivoxCloud &cloud) {
                 spdlog::info("Self sync IMU and LiDAR, time diff is {}", timediff_lidar_wrt_imu_);
             }
 
-            PointCloudType::Ptr ptr(new PointCloudType());
+            auto ptr = std::make_shared<PointCloudType>();
             preprocess_->Process(cloud, ptr);
             lidar_buffer_.emplace_back(ptr);
             time_buffer_.emplace_back(last_timestamp_lidar_);
         },
         "Preprocess (Livox)");
-    mtx_buffer_.unlock();
 }
 
 template <typename PointT>
 void LaserMapping::AddPointCloud(const pcl::PointCloud<PointT> &cloud, double timestamp) {
-    mtx_buffer_.lock();
+    std::lock_guard<std::mutex> lock(mtx_buffer_);
     Timer::Evaluate(
         [&, this]() {
             scan_count_++;
@@ -235,14 +241,13 @@ void LaserMapping::AddPointCloud(const pcl::PointCloud<PointT> &cloud, double ti
                 lidar_buffer_.clear();
             }
 
-            PointCloudType::Ptr ptr(new PointCloudType());
+            auto ptr = std::make_shared<PointCloudType>();
             preprocess_->Process(cloud, ptr);
             lidar_buffer_.push_back(ptr);
             time_buffer_.push_back(timestamp);
             last_timestamp_lidar_ = timestamp;
         },
         "Preprocess (Standard)");
-    mtx_buffer_.unlock();
 }
 
 // Explicit template instantiations
@@ -253,10 +258,12 @@ template void LaserMapping::AddPointCloud(const pcl::PointCloud<robosense_pcl::P
 template void LaserMapping::AddPointCloud(const pcl::PointCloud<livox_pcl::Point> &, double);
 
 PoseStamped LaserMapping::GetCurrentPose() const {
+    std::lock_guard<std::mutex> lock(mtx_state_);
     return msg_body_pose_;
 }
 
 Odometry LaserMapping::GetCurrentOdometry() const {
+    std::lock_guard<std::mutex> lock(mtx_state_);
     Odometry odom;
     odom.timestamp = lidar_end_time_;
     odom.pose.position = Eigen::Vector3d(state_point_.pos(0), state_point_.pos(1), state_point_.pos(2));
@@ -277,6 +284,11 @@ Odometry LaserMapping::GetCurrentOdometry() const {
 }
 
 void LaserMapping::Run() {
+    if (!initialized_) {
+        spdlog::warn("Run() called before Init(), ignoring");
+        return;
+    }
+
     if (!SyncPackages()) {
         return;
     }
@@ -340,10 +352,13 @@ void LaserMapping::Run() {
                   frame_num_, scan_undistort_->points.size(), cur_pts, ivox_->NumValidGrids(), effect_feat_num_);
 
     // update pose and path
-    SetPosestamp(msg_body_pose_);
-    msg_body_pose_.timestamp = lidar_end_time_;
-    if (path_pub_en_ || path_save_en_) {
-        path_.push_back(msg_body_pose_);
+    {
+        std::lock_guard<std::mutex> lock(mtx_state_);
+        SetPosestamp(msg_body_pose_);
+        msg_body_pose_.timestamp = lidar_end_time_;
+        if (path_pub_en_ || path_save_en_) {
+            path_.push_back(msg_body_pose_);
+        }
     }
 
     // save map pcd if enabled
@@ -356,6 +371,7 @@ void LaserMapping::Run() {
 }
 
 bool LaserMapping::SyncPackages() {
+    std::lock_guard<std::mutex> lock(mtx_buffer_);
     if (lidar_buffer_.empty() || imu_buffer_.empty()) {
         return false;
     }
@@ -611,7 +627,7 @@ void LaserMapping::SaveFrameWorld() {
     if (dense_pub_en_) {
         PointCloudType::Ptr laserCloudFullRes(scan_undistort_);
         int size = laserCloudFullRes->points.size();
-        laserCloudWorld.reset(new PointCloudType(size, 1));
+        laserCloudWorld = std::make_shared<PointCloudType>(size, 1);
         for (int i = 0; i < size; i++) {
             PointBodyToWorld(&laserCloudFullRes->points[i], &laserCloudWorld->points[i]);
         }
@@ -635,6 +651,38 @@ void LaserMapping::SaveFrameWorld() {
     }
 }
 
+std::vector<PoseStamped> LaserMapping::GetTrajectory() const {
+    std::lock_guard<std::mutex> lock(mtx_state_);
+    return path_;
+}
+
+CloudPtr LaserMapping::GetUndistortedCloud() const {
+    std::lock_guard<std::mutex> lock(mtx_state_);
+    auto copy = std::make_shared<PointCloudType>();
+    if (scan_undistort_) {
+        *copy = *scan_undistort_;
+    }
+    return copy;
+}
+
+CloudPtr LaserMapping::GetDownsampledWorldCloud() const {
+    std::lock_guard<std::mutex> lock(mtx_state_);
+    auto copy = std::make_shared<PointCloudType>();
+    if (scan_down_world_) {
+        *copy = *scan_down_world_;
+    }
+    return copy;
+}
+
+CloudPtr LaserMapping::GetMapCloud() const {
+    std::lock_guard<std::mutex> lock(mtx_state_);
+    auto copy = std::make_shared<PointCloudType>();
+    if (pcl_wait_save_) {
+        *copy = *pcl_wait_save_;
+    }
+    return copy;
+}
+
 void LaserMapping::Savetrajectory(const std::string &traj_file) {
     std::ofstream ofs;
     ofs.open(traj_file, std::ios::out);
@@ -643,6 +691,7 @@ void LaserMapping::Savetrajectory(const std::string &traj_file) {
         return;
     }
 
+    std::lock_guard<std::mutex> lock(mtx_state_);
     ofs << "#timestamp x y z q_x q_y q_z q_w" << std::endl;
     for (const auto &p : path_) {
         ofs << std::fixed << std::setprecision(6) << p.timestamp << " " << std::setprecision(15)

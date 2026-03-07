@@ -18,13 +18,13 @@ class LaserMappingEdgeTest : public ::testing::Test {
 // --- Config edge cases ---
 
 TEST_F(LaserMappingEdgeTest, InvalidYAMLPath) {
-    // yaml-cpp throws on non-existent file
-    EXPECT_ANY_THROW(mapping_->Init("/nonexistent/path/config.yaml"));
+    // Returns false on non-existent file
+    EXPECT_FALSE(mapping_->Init("/nonexistent/path/config.yaml"));
 }
 
 TEST_F(LaserMappingEdgeTest, EmptyYAMLPath) {
-    // yaml-cpp throws on empty path
-    EXPECT_ANY_THROW(mapping_->Init(""));
+    // Returns false on empty path
+    EXPECT_FALSE(mapping_->Init(""));
 }
 
 TEST_F(LaserMappingEdgeTest, MalformedYAMLContent) {

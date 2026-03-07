@@ -31,9 +31,14 @@ class LaserMapping {
     /// init from yaml config (the only init path)
     bool Init(const std::string &config_yaml);
 
+    /// Returns true if Init() has been successfully called.
+    bool IsInitialized() const { return initialized_; }
+
+    /// Run one iteration of the mapping pipeline.
+    /// Must be called from a single thread. NOT re-entrant.
     void Run();
 
-    // input API
+    // input API — thread-safe, can be called from sensor callback threads
     void AddIMU(const IMUData &imu);
     void AddPointCloud(const PointCloudType::Ptr &cloud, double timestamp);
     void AddPointCloud(const LivoxCloud &cloud);
@@ -41,10 +46,19 @@ class LaserMapping {
     template <typename PointT>
     void AddPointCloud(const pcl::PointCloud<PointT> &cloud, double timestamp);
 
-    // output API
+    // output API — thread-safe, can be called concurrently with Run()
     PoseStamped GetCurrentPose() const;
     Odometry GetCurrentOdometry() const;
-    const std::vector<PoseStamped> &GetTrajectory() const { return path_; }
+    std::vector<PoseStamped> GetTrajectory() const;
+
+    /// Get a copy of the latest undistorted scan (body frame).
+    CloudPtr GetUndistortedCloud() const;
+
+    /// Get a copy of the latest downsampled scan (world frame).
+    CloudPtr GetDownsampledWorldCloud() const;
+
+    /// Get a copy of the accumulated map cloud.
+    CloudPtr GetMapCloud() const;
 
     // sync lidar with imu
     bool SyncPackages();
@@ -101,8 +115,12 @@ class LaserMapping {
     std::vector<char> point_selected_surf_;           // selected points
     common::VV4F plane_coef_;                         // plane coeffs
 
+    /// synchronization
+    std::mutex mtx_buffer_;              // protects data buffers (input)
+    mutable std::mutex mtx_state_;       // protects output state (pose, trajectory, clouds)
+    bool initialized_ = false;           // set by Init(), checked by Run()
+
     /// data buffers
-    std::mutex mtx_buffer_;
     std::deque<double> time_buffer_;
     std::deque<PointCloudType::Ptr> lidar_buffer_;
     std::deque<IMUData::Ptr> imu_buffer_;
