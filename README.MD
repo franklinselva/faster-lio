@@ -1,201 +1,183 @@
-## FasterLIO
+# Faster-LIO
 
-This is the code repository of FasterLIO by Chunge Bai, Tao Xiang, Yajie Chen, Haoqian Wang, Fang Zhang and Xiang Gao.
+A standalone C++ library for lightweight, tightly coupled lidar-inertial odometry using parallel sparse incremental voxels (iVox). Forked from [gaoxiang12/faster-lio](https://github.com/gaoxiang12/faster-lio) and refactored into a pure C++ library with no ROS dependency.
 
-Faster-LIO is a light-weight Lidar-inertial odometry for lidar pose tracking and point cloud mapping. It is developed on
-the base of [FastLIO2](https://github.com/hku-mars/FAST_LIO) and provides about 1.5-2x speed increase. It achieves
-almost 1k-2k hz for solid-state lidars and over 100 hz for a typical 32 lines spinning lidar. Please refer to [our paper](./doc/faster-lio.pdf)
-for more details.
+Faster-LIO achieves 1k–2k Hz for solid-state lidars and over 200 Hz for 32-line spinning lidars, while preserving the same level of accuracy as FastLIO2. See the [paper](./doc/faster-lio.pdf) for details.
 
-Below is the FPS tested with avia and velodyne 32 spinning lidar from FastLIO2 and [NCLT](http://robots.engin.umich.edu/nclt/), where "AMD" is tested with AMD R7 5800X and "Intel" tested with Intel Xeon Gold 5218.
+## Key Changes from Upstream
 
-<div  align="center">  
-<img src="https://github.com/gaoxiang12/faster-lio/blob/main/doc/fps-fasterlio.png" width = "1080" align=center />
-</div>
+- **No ROS dependency** — pure C++ library with a clean `Init / AddIMU / AddPointCloud / GetCurrentPose` API
+- **Multi-sensor support** — Livox AVIA, Velodyne, Ouster, Hesai XT32, RoboSense, Livox PointCloud2
+- **Standalone build** — CMake-based, fetches googletest and spdlog automatically
+- **Comprehensive tests** — 118 test cases covering core algorithms, edge cases, and production robustness
 
-<div  align="center">  
-<img src="https://github.com/gaoxiang12/faster-lio/blob/main/doc/faster-lio-nclt.png" width = "1080" align=center />
-</div>
+## Dependencies
 
-# Quick Start
+- C++17 compiler (GCC 9+, Clang 10+, or Apple Clang)
+- CMake 3.14+
+- Eigen3
+- PCL (common, io, filters)
+- TBB
+- yaml-cpp
+- gflags (for examples only)
 
-## Docker
-
-```bash
-git clone
-cd faster-lio/docker
-docker-compose build
-docker-compose up
-```
-
-Before entering `docker-compose up` command, you should enter `xhost +local:docker` in the local terminal to enable docker to communicate with Xserver on the host.
-
-update `bag` file path in `.env`, then run.
+### Ubuntu / Debian
 
 ```bash
-catkin_make
-source devel/setup.bash
-roslaunch faster_lio mapping_avia.launch
+sudo apt-get install libeigen3-dev libpcl-dev libtbb-dev libyaml-cpp-dev libgflags-dev
 ```
 
-Open another terminal, then play `bag` file.
-
-### issue
-
-`QStandardPaths: XDG_RUNTIME_DIR not set, defaulting to '/tmp/runtime-root'`
-
-**Don't worry, it can run normally**. you can run `source /etc/profile&& source /opt/ros/noetic/setup.bash && source devel/setup.bash`, then `run roslaunch xxx`
-
-## Dependency
-
-FasterLIO is tested in Ubuntu 18.04 and Ubuntu 20.04. Please install the following libraries before compilation.
-
-1. ROS (melodic or noetic)
-2. glog: `sudo apt-get install libgoogle-glog-dev`
-3. eigen: `sudo apt-get install libeigen3-dev`
-4. pcl: `sudo apt-get install libpcl-dev`
-5. yaml-cpp: `sudo apt-get install libyaml-cpp-dev`
-
-## Compile
-
-FasterLIO can be compiled by plain cmake or catkin_make. In Ubuntu 20.04, the compile step is relatively simple.
-
-1. Plain cmake
-
-Use the following commands to build FasterLIO:
-
-```bin/bash
-mkdir build
-cd build
-cmake .. -DCMAKE_BUILD_TYPE=Release
-make -j4
-```
-
-Note: iVox type should be specified by cmake at compile time. By default we will use linear iVox.
-Use `cmake .. -DWITH_IVOX_NODE_TYPE_PHC=ON` to build the FasterLIO with PHC iVox.
-
-2. catkin_make
-
-Clone this repository to your catkin workspace, e.g., ~/catkin_ws/src, then use catkin_make instead of the above cmake
-commands. You can also specify the iVox type in catkin_make parameters.
-
-After the compilation, you will get the a libfaster_lio.so and two executable files. If you choose plain cmake build,
-they will be located in ./build/devel/lib/faster_lio. If you use catkin_make, you could run them with rosrun and
-roslaunch.
-
-3. Compile in Ubuntu 18.04 or earlier
-
-Since FasterLIO use cpp 17 as its standard (which requires a higher version of g++), you should upgrade the compiler and
-use the earlier tbb library provided in the thirdparty of this repo. Please follow the steps here:
-
-- Upgrade the g++ compiler to 9.0 or higher by:
+### macOS (Homebrew)
 
 ```bash
-sudo add-apt-repository ppa:ubuntu-toolchain-r/test
-sudo apt update
-sudo apt install gcc-9
-cd /usr/bin
-sudo rm gcc g++
-sudo ln -s gcc-9 gcc
-sudo ln -s g++-9 g++
+brew install eigen pcl tbb yaml-cpp gflags
 ```
 
-- unzip the tbb library in the thirdparty:
+## Quick Start
+
+A [justfile](https://github.com/casey/just) is provided for common tasks:
 
 ```bash
-cd thirdparty
-tar -xvf tbb2018_20170726oss_lin.tgz
+just build    # configure and build (with tests and examples)
+just test     # build and run all tests
+just clean    # remove the build directory
 ```
 
-- specify the tbb directory in the cmake stage:
+### Manual Build
 
 ```bash
-cd ../build
-cmake .. -DCUSTOM_TBB_DIR=`pwd`/../thirdparty/tbb2018_20170726oss
+cmake -B build -DBUILD_TESTS=ON -DBUILD_EXAMPLES=ON
+cmake --build build -j$(nproc)
 ```
 
-Then just build FasterLIO with make.
-
-## Prepare the datasets
-
-Download the avia/nclt bags in your computer:
-
-- [avia bags](https://drive.google.com/drive/folders/1YL5MQVYgAM8oAWUm7e3OGXZBPKkanmY1?usp=sharing)
-- [nclt bags](https://drive.google.com/drive/folders/1VBK5idI1oyW0GC_I_Hxh63aqam3nocNK)
-
-The link of the dataset is outdated. Please use the NCLT bags in SAD datasets:
-BaiduYun: https://pan.baidu.com/s/1ELOcF1UTKdfiKBAaXnE8sQ?pwd=feky access code: feky
-OneDrive：https://1drv.ms/u/s!AgNFVSzSYXMahcEZejoUwCaHRcactQ?e=YsOYy2
-
-## Run FasterLIO
-
-FasterLIO can be called like a plain binary program. It can run in offline mode or online mode like any ros program.
-
-- Offline mode
-
-Call run_mapping_offline with parameters to specify the bag file and the config file like:
+To use PHC iVox instead of the default linear iVox:
 
 ```bash
-./build/devel/lib/faster_lio/run_mapping_offline --bag_file your_avia_bag_file --config_file ./config/avia.yaml
+cmake -B build -DWITH_IVOX_NODE_TYPE_PHC=ON -DBUILD_TESTS=ON
+cmake --build build -j$(nproc)
 ```
 
-for avia. For NCLT, just run:
+### Run Tests
 
 ```bash
-./build/devel/lib/faster_lio/run_mapping_offline --bag_file your_nclt_bag_file --config_file ./config/velodyne.yaml
+cd build && ctest --output-on-failure
 ```
 
-Please replace "your avia bag file" with the path in your computer. FasterLIO will print the FPS and time usage when it
-quits:
+### Run Example
 
-```shell
-I0216 17:16:05.286536 26492 run_mapping_offline.cc:89] Faster LIO average FPS: 1884.6
-I0216 17:16:05.286549 26492 run_mapping_offline.cc:91] save trajectory to: ./src/fast_lio2/Log/faster_lio/20120615.tum
-I0216 17:16:05.286706 26492 utils.h:52] >>> ===== Printing run time =====
-I0216 17:16:05.286711 26492 utils.h:54] > [     IVox Add Points ] average time usage: 0.0147311 ms , called times: 6373
-I0216 17:16:05.286721 26492 utils.h:54] > [     Incremental Mapping ] average time usage: 0.0271787 ms , called times: 6373
-I0216 17:16:05.286731 26492 utils.h:54] > [     ObsModel (IEKF Build Jacobian) ] average time usage: 0.00745852 ms , called times: 25040
-I0216 17:16:05.286752 26492 utils.h:54] > [     ObsModel (Lidar Match) ] average time usage: 0.0298004 ms , called times: 25040
-I0216 17:16:05.286775 26492 utils.h:54] > [ Downsample PointCloud ] average time usage: 0.0224052 ms , called times: 6373
-I0216 17:16:05.286784 26492 utils.h:54] > [ IEKF Solve and Update ] average time usage: 0.342008 ms , called times: 6373
-I0216 17:16:05.286792 26492 utils.h:54] > [ Laser Mapping Single Run ] average time usage: 0.530618 ms , called times: 6387
-I0216 17:16:05.286800 26492 utils.h:54] > [ Preprocess (Livox) ] average time usage: 0.0267813 ms , called times: 6387
-I0216 17:16:05.286808 26492 utils.h:54] > [ Undistort Pcl ] average time usage: 0.0810455 ms , called times: 6375
-I0216 17:16:05.286816 26492 utils.h:59] >>> ===== Printing run time end =====
+The `run_mapping` example reads PCD files and an IMU CSV offline:
+
+```bash
+just example ./config/avia.yaml
+
+# or directly:
+./build/run_mapping \
+    --config_file ./config/avia.yaml \
+    --pcd_dir /path/to/pcds \
+    --imu_file /path/to/imu.csv \
+    --num_pcd 100
 ```
 
-Point clouds will be saved to PCD/scans.pcd by default.
+## Library API
 
-- Online mode
+Include the umbrella header and link against `faster_lio`:
 
-Online mode could be launched through rosrun/roslaunch/directly call. We use roslaunch as an example:
+```cpp
+#include <faster_lio/faster_lio.h>
 
-1. Launch faster-lio: `roslaunch faster_lio mapping_avia.launch` This will give you a rviz window.
-2. Play the bags using `rosbag play your bag file` to see the online outputs.
+faster_lio::LaserMapping mapping;
+mapping.Init("config/avia.yaml");
 
-# Acknowledgements
+// Feed sensor data
+mapping.AddIMU(imu_data);
+mapping.AddPointCloud(cloud, timestamp);
+mapping.Run();
 
-- We thank the authors of [FastLIO2](https://github.com/hku-mars/FAST_LIO), LOAM for their great jobs.
-- Please cite our work if you are using FasterLIO in academic work. Bibtex is provided here (early-access version):
+// Query results
+auto pose = mapping.GetCurrentPose();
+auto odom = mapping.GetCurrentOdometry();
+auto trajectory = mapping.GetTrajectory();
+```
+
+### CMake Integration
+
+```cmake
+add_subdirectory(faster-lio)
+target_link_libraries(your_target PRIVATE faster_lio)
+```
+
+## Configuration
+
+YAML config files are provided for supported sensors under `config/`:
+
+| File             | Sensor          |
+| ---------------- | --------------- |
+| `avia.yaml`      | Livox AVIA      |
+| `livox.yaml`     | Livox (generic) |
+| `mid360.yaml`    | Livox Mid-360   |
+| `horizon.yaml`   | Livox Horizon   |
+| `velodyne.yaml`  | Velodyne 32     |
+| `ouster64.yaml`  | Ouster OS1-64   |
+| `hesai.yaml`     | Hesai XT32      |
+| `robosense.yaml` | RoboSense       |
+
+Key parameters:
+
+- `ivox_grid_resolution` — voxel size (default 0.5m). Increase if tracking is unstable.
+- `ivox_nearby_type` — neighbor search pattern: `6`, `18`, or `26`
+- `max_iteration` — IEKF iterations (default 3–4)
+- `filter_size_surf` / `filter_size_map` — downsampling leaf sizes
+
+## Project Structure
 
 ```
+├── include/
+│   ├── faster_lio/       # public headers
+│   │   ├── faster_lio.h  # umbrella header
+│   │   ├── laser_mapping.h
+│   │   ├── imu_processing.h
+│   │   ├── pointcloud_preprocess.h
+│   │   ├── types.h
+│   │   └── ...
+│   └── ivox3d/           # iVox spatial data structure
+├── src/                  # library implementation
+├── config/               # sensor YAML configs
+├── examples/             # run_mapping offline example
+├── tests/                # unit tests (118 cases)
+├── doc/                  # paper PDF
+├── CMakeLists.txt
+└── justfile
+```
+
+## Known Issues
+
+- iVox is sensitive to voxel size. Enlarge `ivox_grid_resolution` if tracking is unstable.
+- `-march=native` may cause segfaults in PCL point cloud destruction on some platforms. See [this StackOverflow thread](https://stackoverflow.com/questions/61278204/segmentation-fault-when-deallocating-pclpointcloudpclpointxyzptr).
+- macOS Apple Clang does not support `std::execution` parallel policies; a TBB-based fallback is used automatically via `compat.h`.
+
+## Acknowledgements
+
+This project is a fork of [gaoxiang12/faster-lio](https://github.com/gaoxiang12/faster-lio), the original open-source implementation of Faster-LIO. We gratefully acknowledge the work of the original authors:
+
+> Chunge Bai, Tao Xiao, Yajie Chen, Haoqian Wang, Fang Zhang, and Xiang Gao.
+> **"Faster-LIO: Lightweight Tightly Coupled Lidar-Inertial Odometry Using Parallel Sparse Incremental Voxels."**
+> _IEEE Robotics and Automation Letters_, vol. 7, no. 2, pp. 4861–4868, 2022.
+
+We also thank the authors of [FastLIO2](https://github.com/hku-mars/FAST_LIO) and [IKFoM](https://github.com/hku-mars/IKFoM), upon which the upstream project was built. The original work was supported by Idriver+ Technologies Co. Ltd.
+
+```bibtex
 @ARTICLE{9718203,
-author={Bai, Chunge and Xiao, Tao and Chen, Yajie and Wang, Haoqian and Zhang, Fang and Gao, Xiang},
-journal={IEEE Robotics and Automation Letters},
-title={Faster-LIO: Lightweight Tightly Coupled Lidar-Inertial Odometry Using Parallel Sparse Incremental Voxels},
-year={2022},
-volume={7},
-number={2},
-pages={4861-4868},
-doi={10.1109/LRA.2022.3152830}}
+  author={Bai, Chunge and Xiao, Tao and Chen, Yajie and Wang, Haoqian and Zhang, Fang and Gao, Xiang},
+  journal={IEEE Robotics and Automation Letters},
+  title={Faster-LIO: Lightweight Tightly Coupled Lidar-Inertial Odometry Using Parallel Sparse Incremental Voxels},
+  year={2022},
+  volume={7},
+  number={2},
+  pages={4861-4868},
+  doi={10.1109/LRA.2022.3152830}
+}
 ```
 
-- This work is supported by Idriver+ Technologies Co. Ltd.
+## License
 
-# Known Issues
-
-- iVox is somehow sensitive to the voxel size. Please enlarge the voxel size if FasterLIO is not stable in your
-  application.
-- set -march=native in cmake may cause a core dump in the PCL point cloud deconstruction step (Ubuntu 20.04, gcc 11, AMD
-  5800X)(Ubuntu 18.04, gcc 9, i7-10750H), see
-  https://stackoverflow.com/questions/61278204/segmentation-fault-when-deallocating-pclpointcloudpclpointxyzptr
+This project inherits the [Creative Commons Attribution 4.0 International License](https://creativecommons.org/licenses/by/4.0/) from the original Faster-LIO repository.
