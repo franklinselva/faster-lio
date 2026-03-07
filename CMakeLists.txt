@@ -13,12 +13,17 @@ option(BUILD_TESTS "Build unit tests" ON)
 
 # Dependencies
 include(FetchContent)
-FetchContent_Declare(
-    spdlog
-    GIT_REPOSITORY https://github.com/gabime/spdlog.git
-    GIT_TAG v1.15.1
-)
-FetchContent_MakeAvailable(spdlog)
+
+# Use system spdlog if available, otherwise fetch from source
+find_package(spdlog QUIET)
+if(NOT spdlog_FOUND)
+  FetchContent_Declare(
+      spdlog
+      GIT_REPOSITORY https://github.com/gabime/spdlog.git
+      GIT_TAG v1.15.1
+  )
+  FetchContent_MakeAvailable(spdlog)
+endif()
 
 find_package(Eigen3 REQUIRED)
 find_package(PCL 1.8 REQUIRED COMPONENTS common io filters)

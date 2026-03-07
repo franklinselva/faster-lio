@@ -70,7 +70,9 @@ bool LaserMapping::LoadParamsFromYAML(const std::string &yaml_file) {
         b_gyr_cov = yaml["mapping"]["b_gyr_cov"].as<float>();
         b_acc_cov = yaml["mapping"]["b_acc_cov"].as<float>();
         preprocess_->SetBlind(yaml["preprocess"]["blind"].as<double>());
-        preprocess_->SetTimeScale(yaml["preprocess"]["time_scale"].as<float>());
+        if (yaml["preprocess"]["time_scale"]) {
+            preprocess_->SetTimeScale(yaml["preprocess"]["time_scale"].as<float>());
+        }
         lidar_type = yaml["preprocess"]["lidar_type"].as<int>();
         preprocess_->SetNumScans(yaml["preprocess"]["scan_line"].as<int>());
         preprocess_->SetPointFilterNum(yaml["point_filter_num"].as<int>());
