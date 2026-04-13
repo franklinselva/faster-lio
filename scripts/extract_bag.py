@@ -13,6 +13,8 @@ Requires: pip install rosbags numpy
 No ROS installation needed.
 """
 
+from __future__ import annotations
+
 import argparse
 import struct
 import sys
@@ -40,32 +42,39 @@ SEQUENCE = Nodetype.SEQUENCE
 
 
 def register_livox_types(typestore):
-    """Register livox_ros_driver/CustomMsg and CustomPoint with rosbags typestore."""
+    """Register livox_ros_driver/CustomMsg and CustomPoint with rosbags typestore.
+
+    Covers both livox_ros_driver (v1, AVIA) and livox_ros_driver2 (v2, Mid360).
+    """
+    point_def = (
+        [],
+        [
+            ("offset_time", (BASE, ("uint32", 0))),
+            ("x", (BASE, ("float32", 0))),
+            ("y", (BASE, ("float32", 0))),
+            ("z", (BASE, ("float32", 0))),
+            ("reflectivity", (BASE, ("uint8", 0))),
+            ("tag", (BASE, ("uint8", 0))),
+            ("line", (BASE, ("uint8", 0))),
+        ],
+    )
+    msg_def = lambda point_type: (
+        [],
+        [
+            ("header", (NAME, "std_msgs/msg/Header")),
+            ("timebase", (BASE, ("uint64", 0))),
+            ("point_num", (BASE, ("uint32", 0))),
+            ("lidar_id", (BASE, ("uint8", 0))),
+            ("rsvd", (ARRAY, ((BASE, ("uint8", 0)), 3))),
+            ("points", (SEQUENCE, ((NAME, point_type), 0))),
+        ],
+    )
     typestore.register(
         {
-            "livox_ros_driver/msg/CustomPoint": (
-                [],
-                [
-                    ("offset_time", (BASE, ("uint32", 0))),
-                    ("x", (BASE, ("float32", 0))),
-                    ("y", (BASE, ("float32", 0))),
-                    ("z", (BASE, ("float32", 0))),
-                    ("reflectivity", (BASE, ("uint8", 0))),
-                    ("tag", (BASE, ("uint8", 0))),
-                    ("line", (BASE, ("uint8", 0))),
-                ],
-            ),
-            "livox_ros_driver/msg/CustomMsg": (
-                [],
-                [
-                    ("header", (NAME, "std_msgs/msg/Header")),
-                    ("timebase", (BASE, ("uint64", 0))),
-                    ("point_num", (BASE, ("uint32", 0))),
-                    ("lidar_id", (BASE, ("uint8", 0))),
-                    ("rsvd", (ARRAY, ((BASE, ("uint8", 0)), 3))),
-                    ("points", (SEQUENCE, ((NAME, "livox_ros_driver/msg/CustomPoint"), 0))),
-                ],
-            ),
+            "livox_ros_driver/msg/CustomPoint": point_def,
+            "livox_ros_driver/msg/CustomMsg": msg_def("livox_ros_driver/msg/CustomPoint"),
+            "livox_ros_driver2/msg/CustomPoint": point_def,
+            "livox_ros_driver2/msg/CustomMsg": msg_def("livox_ros_driver2/msg/CustomPoint"),
         }
     )
 

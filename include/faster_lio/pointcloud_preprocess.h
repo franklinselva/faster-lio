@@ -143,6 +143,13 @@ class PointCloudPreprocess {
     void Process(const pcl::PointCloud<robosense_pcl::Point> &msg, PointCloudType::Ptr &pcl_out);
     void Process(const pcl::PointCloud<livox_pcl::Point> &msg, PointCloudType::Ptr &pcl_out);
     void Process(const LivoxCloud &msg, PointCloudType::Ptr &pcl_out);
+
+    /// Generic handler for pre-formed PointXYZINormal clouds.
+    /// Filters zeros and blind-distance points, applies point_filter_num downsampling.
+    /// Preserves existing curvature values; leaves them at 0 when absent.
+    /// Scan-period estimation for IMU sync is handled by SyncPackages, not here.
+    void Process(const PointCloudType &cloud, PointCloudType::Ptr &pcl_out);
+
     void Set(LidarType lid_type, double bld, int pfilt_num);
 
     // accessors
@@ -168,6 +175,7 @@ class PointCloudPreprocess {
     void HesaiHandler(const pcl::PointCloud<hesai_pcl::Point> &msg);
     void RobosenseHandler(const pcl::PointCloud<robosense_pcl::Point> &msg);
     void LivoxHandler(const pcl::PointCloud<livox_pcl::Point> &msg);
+    void GenericHandler(const PointCloudType &cloud);
 
     PointCloudType cloud_full_, cloud_out_;
 

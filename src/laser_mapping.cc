@@ -193,10 +193,12 @@ void LaserMapping::AddPointCloud(const PointCloudType::Ptr &cloud, double timest
                 spdlog::info("Self sync IMU and LiDAR, time diff is {}", timediff_lidar_wrt_imu_);
             }
 
-            lidar_buffer_.emplace_back(cloud);
+            auto ptr = std::make_shared<PointCloudType>();
+            preprocess_->Process(*cloud, ptr);
+            lidar_buffer_.emplace_back(ptr);
             time_buffer_.emplace_back(timestamp);
         },
-        "Preprocess (AddPointCloud)");
+        "Preprocess (Generic)");
 }
 
 void LaserMapping::AddPointCloud(const LivoxCloud &cloud) {
@@ -387,15 +389,40 @@ bool LaserMapping::SyncPackages() {
         if (measures_.lidar_->points.size() <= 1) {
             spdlog::warn("Input point cloud has <= 1 point, using mean scan time estimate");
             lidar_end_time_ = measures_.lidar_bag_time_ + lidar_mean_scantime_;
-        } else if (measures_.lidar_->points.back().curvature / double(1000) < 0.5 * lidar_mean_scantime_) {
-            lidar_end_time_ = measures_.lidar_bag_time_ + lidar_mean_scantime_;
         } else {
-            scan_num_++;
-            lidar_end_time_ = measures_.lidar_bag_time_ + measures_.lidar_->points.back().curvature / double(1000);
-            lidar_mean_scantime_ +=
-                (measures_.lidar_->points.back().curvature / double(1000) - lidar_mean_scantime_) / scan_num_;
+            double last_curvature_s = measures_.lidar_->points.back().curvature / double(1000);
+
+            if (last_curvature_s > 1e-6 &&
+                (lidar_mean_scantime_ < 1e-6 || last_curvature_s >= 0.5 * lidar_mean_scantime_)) {
+                // Per-point timing available — use curvature directly
+                scan_num_++;
+                lidar_end_time_ = measures_.lidar_bag_time_ + last_curvature_s;
+                lidar_mean_scantime_ += (last_curvature_s - lidar_mean_scantime_) / scan_num_;
+            } else if (last_curvature_s > 1e-6) {
+                // Curvature present but suspiciously small — use running average
+                lidar_end_time_ = measures_.lidar_bag_time_ + lidar_mean_scantime_;
+            } else {
+                // No per-point timing (curvature ≈ 0). Estimate scan period from
+                // the timestamp gap between consecutive scans.
+                if (prev_lidar_bag_time_ > 0.0) {
+                    double dt = measures_.lidar_bag_time_ - prev_lidar_bag_time_;
+                    if (dt > 1e-6 && dt < 1.0) {
+                        scan_num_++;
+                        lidar_mean_scantime_ += (dt - lidar_mean_scantime_) / scan_num_;
+                    }
+                }
+                if (lidar_mean_scantime_ > 1e-6) {
+                    lidar_end_time_ = measures_.lidar_bag_time_ + lidar_mean_scantime_;
+                } else {
+                    // Very first scan, no reference — default to 0.1s (10 Hz)
+                    lidar_mean_scantime_ = 0.1;
+                    scan_num_ = 1;
+                    lidar_end_time_ = measures_.lidar_bag_time_ + 0.1;
+                }
+            }
         }
 
+        prev_lidar_bag_time_ = measures_.lidar_bag_time_;
         measures_.lidar_end_time_ = lidar_end_time_;
         lidar_pushed_ = true;
     }

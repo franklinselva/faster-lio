@@ -13,6 +13,8 @@ Usage:
     python scripts/plot_metrics.py --time_log ./Log/time.log --save ./Log/metrics.pdf
 """
 
+from __future__ import annotations
+
 import argparse
 import csv
 import sys

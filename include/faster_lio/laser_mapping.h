@@ -131,6 +131,7 @@ class LaserMapping {
     bool time_sync_en_ = false;
     double timediff_lidar_wrt_imu_ = 0.0;
     double last_timestamp_lidar_ = 0;
+    double prev_lidar_bag_time_ = -1.0;  // previous scan time for inter-scan period estimation
     double lidar_end_time_ = 0;
     double last_timestamp_imu_ = -1.0;
     double first_lidar_time_ = 0.0;

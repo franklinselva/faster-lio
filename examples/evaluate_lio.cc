@@ -26,6 +26,7 @@ DEFINE_string(gt_tum_file, "./Log/ground_truth_tum.txt", "path to ground truth o
 DEFINE_string(time_log_file, "./Log/time.log", "path to time log file");
 DEFINE_int32(num_scans, 0, "number of LiDAR scans to process");
 DEFINE_string(lidar_format, "livox", "LiDAR data format: 'livox' (.bin) or 'pcd' (.pcd)");
+DEFINE_string(timestamps_file, "", "path to timestamps file (one timestamp per line, matching scan index)");
 DEFINE_double(time_offset, 0.0, "time offset to add to estimated timestamps before matching ground truth (seconds)");
 DEFINE_double(eval_start, 0.0, "skip estimated poses before this many seconds from start (warmup exclusion)");
 DEFINE_double(eval_end, 0.0, "skip estimated poses after this many seconds from start (0=use all)");
@@ -103,6 +104,21 @@ faster_lio::LivoxCloud LoadLivoxBin(const std::string &path) {
     }
 
     return cloud;
+}
+
+std::vector<double> LoadTimestamps(const std::string &path) {
+    std::vector<double> timestamps;
+    std::ifstream ifs(path);
+    if (!ifs.is_open()) {
+        spdlog::error("Cannot open timestamps file: {}", path);
+        return timestamps;
+    }
+    double ts;
+    while (ifs >> ts) {
+        timestamps.push_back(ts);
+    }
+    spdlog::info("Loaded {} timestamps from {}", timestamps.size(), path);
+    return timestamps;
 }
 
 std::vector<GTPose> LoadGroundTruth(const std::string &path) {
@@ -316,6 +332,12 @@ int main(int argc, char **argv) {
         ground_truth = LoadGroundTruth(FLAGS_ground_truth_file);
     }
 
+    // Load scan timestamps (optional — uses IMU-derived timestamps if absent)
+    std::vector<double> scan_timestamps;
+    if (!FLAGS_timestamps_file.empty()) {
+        scan_timestamps = LoadTimestamps(FLAGS_timestamps_file);
+    }
+
     // Load all IMU data
     auto imu_entries = LoadIMUCSV(FLAGS_imu_file);
     spdlog::info("Loaded {} IMU entries from {}", imu_entries.size(), FLAGS_imu_file);
@@ -354,9 +376,13 @@ int main(int argc, char **argv) {
                 continue;
             }
 
-            double pcd_timestamp = scan_i * 0.1;
-            if (!imu_entries.empty() && imu_idx < imu_entries.size()) {
+            double pcd_timestamp;
+            if (scan_i < static_cast<int>(scan_timestamps.size())) {
+                pcd_timestamp = scan_timestamps[scan_i];
+            } else if (!imu_entries.empty() && imu_idx < imu_entries.size()) {
                 pcd_timestamp = imu_entries[std::min(imu_idx + 10, imu_entries.size() - 1)].timestamp;
+            } else {
+                pcd_timestamp = scan_i * 0.1;
             }
 
             while (imu_idx < imu_entries.size() && imu_entries[imu_idx].timestamp <= pcd_timestamp) {
