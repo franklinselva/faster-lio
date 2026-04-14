@@ -30,6 +30,8 @@ void ImuProcess::Reset() {
     angvel_last_ = common::Zero3d;
     imu_need_init_ = true;
     init_iter_num_ = 1;
+    init_iter_rejected_ = 0;
+    init_iter_tried_ = 0;
     v_imu_.clear();
     IMUpose_.clear();
     last_imu_ = std::make_shared<IMUData>();
@@ -48,6 +50,20 @@ void ImuProcess::SetAccCov(const common::V3D &scaler) { cov_acc_scale_ = scaler;
 void ImuProcess::SetGyrBiasCov(const common::V3D &b_g) { cov_bias_gyr_ = b_g; }
 
 void ImuProcess::SetAccBiasCov(const common::V3D &b_a) { cov_bias_acc_ = b_a; }
+
+void ImuProcess::SetInitMotionGate(bool enabled, double acc_rel_thresh, double gyr_thresh,
+                                   int min_accepted, int max_tries) {
+    init_gate_enabled_ = enabled;
+    init_acc_rel_thresh_ = acc_rel_thresh;
+    init_gyr_thresh_ = gyr_thresh;
+    init_min_accepted_ = std::max(1, min_accepted);
+    init_max_tries_ = std::max(init_min_accepted_, max_tries);
+    if (enabled) {
+        spdlog::info("IMU init motion-gate ENABLED: acc_rel_thresh={:.4f} (|Δ‖a‖|/‖a‖), "
+                     "gyr_thresh={:.4f} rad/s, min_accepted={}, max_tries={}",
+                     acc_rel_thresh, gyr_thresh, init_min_accepted_, init_max_tries_);
+    }
+}
 
 void ImuProcess::IMUInit(const common::MeasureGroup &meas, esekfom::esekf<state_ikfom, 12, input_ikfom> &kf_state,
                          int &N) {
@@ -68,6 +84,21 @@ void ImuProcess::IMUInit(const common::MeasureGroup &meas, esekfom::esekf<state_
         const auto &gyr_acc = imu->angular_velocity;
         cur_acc << imu_acc.x(), imu_acc.y(), imu_acc.z();
         cur_gyr << gyr_acc.x(), gyr_acc.y(), gyr_acc.z();
+
+        // Optional motion gate: drop samples that look non-static so the
+        // running mean → gravity estimate isn't contaminated by motion.
+        // Accel gate is *relative* to current ‖mean_acc_‖ so it works
+        // regardless of sensor units (m/s² vs g).
+        if (init_gate_enabled_) {
+            ++init_iter_tried_;
+            const double ref = mean_acc_.norm();
+            const double acc_rel_dev = ref > 1e-6 ? std::abs(cur_acc.norm() - ref) / ref : 1e9;
+            const double gyr_mag = cur_gyr.norm();
+            if (acc_rel_dev > init_acc_rel_thresh_ || gyr_mag > init_gyr_thresh_) {
+                ++init_iter_rejected_;
+                continue;
+            }
+        }
 
         mean_acc_ += (cur_acc - mean_acc_) / N;
         mean_gyr_ += (cur_gyr - mean_gyr_) / N;
@@ -274,13 +305,40 @@ void ImuProcess::Process(const common::MeasureGroup &meas, esekfom::esekf<state_
         last_imu_ = meas.imu_.back();
 
         state_ikfom imu_state = kf_state.get_x();
-        if (init_iter_num_ > MAX_INI_COUNT) {
+
+        bool complete = false;
+        bool failed_soft = false;
+        if (init_gate_enabled_) {
+            if (init_iter_num_ > init_min_accepted_) {
+                complete = true;
+            } else if (init_iter_tried_ > init_max_tries_) {
+                complete = true;
+                failed_soft = true;
+            }
+        } else if (init_iter_num_ > MAX_INI_COUNT) {
+            complete = true;
+        }
+
+        if (complete) {
             cov_acc_ *= pow(common::G_m_s2 / mean_acc_.norm(), 2);
             imu_need_init_ = false;
 
             cov_acc_ = cov_acc_scale_;
             cov_gyr_ = cov_gyr_scale_;
-            spdlog::info("IMU initialization complete, {} iterations", init_iter_num_);
+            if (init_gate_enabled_) {
+                if (failed_soft) {
+                    spdlog::warn("IMU init FAIL-SOFT: only {} / {} required static samples after {} tries "
+                                 "(rejected={}); gravity/bias may be inaccurate — widen gate or start static",
+                                 init_iter_num_, init_min_accepted_, init_iter_tried_, init_iter_rejected_);
+                } else {
+                    spdlog::info("IMU init complete (gated): accepted={} rejected={} tried={} "
+                                 "|mean_acc|={:.4f} |mean_gyr|={:.5f}",
+                                 init_iter_num_, init_iter_rejected_, init_iter_tried_,
+                                 mean_acc_.norm(), mean_gyr_.norm());
+                }
+            } else {
+                spdlog::info("IMU initialization complete, {} iterations", init_iter_num_);
+            }
             fout_imu_.open(common::DEBUG_FILE_DIR("imu_.txt"), std::ios::out);
         }
 

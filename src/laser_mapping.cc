@@ -121,6 +121,18 @@ bool LaserMapping::LoadParamsFromYAML(const std::string &yaml_file) {
     p_imu_->SetGyrBiasCov(common::V3D(b_gyr_cov, b_gyr_cov, b_gyr_cov));
     p_imu_->SetAccBiasCov(common::V3D(b_acc_cov, b_acc_cov, b_acc_cov));
 
+    // Optional: motion-gated IMU init. If the yaml block is absent, legacy
+    // behavior is preserved (MAX_INI_COUNT=20 samples, no gating).
+    if (yaml["imu_init"]) {
+        const auto &ii = yaml["imu_init"];
+        const bool en = ii["motion_gate_enabled"] ? ii["motion_gate_enabled"].as<bool>() : false;
+        const double acc_rel_thresh = ii["acc_rel_thresh"] ? ii["acc_rel_thresh"].as<double>() : 0.05;
+        const double gyr_thresh = ii["gyr_thresh"] ? ii["gyr_thresh"].as<double>() : 0.05;
+        const int min_accepted = ii["min_accepted"] ? ii["min_accepted"].as<int>() : DEFAULT_INIT_GATE_MIN_ACCEPTED;
+        const int max_tries = ii["max_tries"] ? ii["max_tries"].as<int>() : DEFAULT_INIT_GATE_MAX_TRIES;
+        p_imu_->SetInitMotionGate(en, acc_rel_thresh, gyr_thresh, min_accepted, max_tries);
+    }
+
     return true;
 }
 
