@@ -77,7 +77,7 @@ docker-eval: docker-build
         && cmake --build build-docker -j2 \
         && mkdir -p Log \
         && ./build-docker/evaluate_lio \
-            --config_file ./config/avia.yaml \
+            --config_file ./config/default.yaml \
             --lidar_dir ./data/indoor02/livox \
             --imu_file ./data/indoor02/imu.csv \
             --num_scans 423 \

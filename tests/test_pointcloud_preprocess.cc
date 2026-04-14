@@ -5,120 +5,103 @@ using namespace faster_lio;
 
 class PointCloudPreprocessTest : public ::testing::Test {
    protected:
-    void SetUp() override {
-        preprocess_ = std::make_shared<PointCloudPreprocess>();
-    }
+    void SetUp() override { preprocess_ = std::make_shared<PointCloudPreprocess>(); }
 
     std::shared_ptr<PointCloudPreprocess> preprocess_;
+
+    static PointType MakePoint(float x, float y, float z, float intensity = 0.0f, float curvature = 0.0f) {
+        PointType p;
+        p.x = x;
+        p.y = y;
+        p.z = z;
+        p.intensity = intensity;
+        p.normal_x = p.normal_y = p.normal_z = 0.0f;
+        p.curvature = curvature;
+        return p;
+    }
 };
 
-TEST_F(PointCloudPreprocessTest, VelodyneProcess) {
-    preprocess_->SetLidarType(LidarType::VELO32);
-    preprocess_->SetBlind(0.5);
+TEST_F(PointCloudPreprocessTest, FiltersZeroOriginPadding) {
+    preprocess_->SetBlind(0.1);
     preprocess_->SetPointFilterNum(1);
-    preprocess_->SetNumScans(16);
-    preprocess_->SetTimeScale(1e-3);
 
-    // Create synthetic velodyne cloud
-    pcl::PointCloud<velodyne_pcl::Point> cloud;
-    for (int i = 0; i < 100; i++) {
-        velodyne_pcl::Point p;
-        p.x = static_cast<float>(i) + 1.0f;
-        p.y = 1.0f;
-        p.z = 1.0f;
-        p.intensity = 100.0f;
-        p.time = static_cast<float>(i) * 0.001f;
-        p.ring = i % 16;
-        cloud.push_back(p);
-    }
+    PointCloudType cloud;
+    cloud.points.push_back(MakePoint(1.0f, 0.0f, 0.0f));
+    cloud.points.push_back(MakePoint(0.0f, 0.0f, 0.0f));  // padding
+    cloud.points.push_back(MakePoint(0.0f, 2.0f, 0.0f));
 
-    PointCloudType::Ptr pcl_out(new PointCloudType());
-    preprocess_->Process(cloud, pcl_out);
+    PointCloudType::Ptr out(new PointCloudType);
+    preprocess_->Process(cloud, out);
 
-    EXPECT_GT(pcl_out->size(), 0u);
-    // All points should be beyond blind distance
-    for (const auto &p : pcl_out->points) {
-        float dist2 = p.x * p.x + p.y * p.y + p.z * p.z;
-        EXPECT_GT(dist2, 0.25f);  // blind^2 = 0.5^2 = 0.25
-    }
+    EXPECT_EQ(out->points.size(), 2u);
 }
 
-TEST_F(PointCloudPreprocessTest, OusterProcess) {
-    preprocess_->SetLidarType(LidarType::OUST64);
-    preprocess_->SetBlind(0.5);
+TEST_F(PointCloudPreprocessTest, FiltersBlindZone) {
+    preprocess_->SetBlind(1.0);
     preprocess_->SetPointFilterNum(1);
 
-    pcl::PointCloud<ouster_pcl::Point> cloud;
-    for (int i = 0; i < 50; i++) {
-        ouster_pcl::Point p;
-        p.x = static_cast<float>(i) + 1.0f;
-        p.y = 0.5f;
-        p.z = 0.5f;
-        p.intensity = 50.0f;
-        p.t = i * 1000;  // nanoseconds
-        p.ring = i % 64;
-        p.reflectivity = 100;
-        p.ambient = 0;
-        p.range = 1000;
-        cloud.push_back(p);
-    }
+    PointCloudType cloud;
+    cloud.points.push_back(MakePoint(0.5f, 0.0f, 0.0f));   // within blind → drop
+    cloud.points.push_back(MakePoint(2.0f, 0.0f, 0.0f));   // outside blind → keep
+    cloud.points.push_back(MakePoint(0.0f, 0.3f, 0.0f));   // within blind → drop
+    cloud.points.push_back(MakePoint(0.0f, 0.0f, 5.0f));   // outside blind → keep
 
-    PointCloudType::Ptr pcl_out(new PointCloudType());
-    preprocess_->Process(cloud, pcl_out);
+    PointCloudType::Ptr out(new PointCloudType);
+    preprocess_->Process(cloud, out);
 
-    EXPECT_GT(pcl_out->size(), 0u);
+    EXPECT_EQ(out->points.size(), 2u);
 }
 
-TEST_F(PointCloudPreprocessTest, LivoxCustomMsgProcess) {
-    preprocess_->SetLidarType(LidarType::AVIA);
-    preprocess_->SetBlind(0.5);
-    preprocess_->SetPointFilterNum(1);
-    preprocess_->SetNumScans(6);
+TEST_F(PointCloudPreprocessTest, DownsamplesByPointFilterNum) {
+    preprocess_->SetBlind(0.01);
+    preprocess_->SetPointFilterNum(3);
 
-    LivoxCloud cloud;
-    cloud.timebase = 100.0;
-    cloud.point_num = 50;
-    cloud.points.resize(50);
-
-    for (int i = 0; i < 50; i++) {
-        cloud.points[i].x = static_cast<float>(i) + 1.0f;
-        cloud.points[i].y = 1.0f;
-        cloud.points[i].z = 1.0f;
-        cloud.points[i].reflectivity = 128;
-        cloud.points[i].tag = 0x10;
-        cloud.points[i].line = i % 6;
-        cloud.points[i].offset_time = i * 1000000;  // nanoseconds
+    PointCloudType cloud;
+    for (int i = 0; i < 10; ++i) {
+        cloud.points.push_back(MakePoint(static_cast<float>(i + 1), 0.0f, 0.0f));
     }
 
-    PointCloudType::Ptr pcl_out(new PointCloudType());
-    preprocess_->Process(cloud, pcl_out);
+    PointCloudType::Ptr out(new PointCloudType);
+    preprocess_->Process(cloud, out);
 
-    // Some points should pass through
-    EXPECT_GT(pcl_out->size(), 0u);
+    // Keeps indices 0, 3, 6, 9 → 4 points
+    EXPECT_EQ(out->points.size(), 4u);
 }
 
-TEST_F(PointCloudPreprocessTest, BlindZoneFiltering) {
-    preprocess_->SetLidarType(LidarType::VELO32);
-    preprocess_->SetBlind(2.0);  // large blind zone
+TEST_F(PointCloudPreprocessTest, PreservesCurvature) {
+    preprocess_->SetBlind(0.01);
     preprocess_->SetPointFilterNum(1);
-    preprocess_->SetTimeScale(1e-3);
 
-    pcl::PointCloud<velodyne_pcl::Point> cloud;
-    // Points within blind zone
-    for (int i = 0; i < 10; i++) {
-        velodyne_pcl::Point p;
-        p.x = 0.1f;
-        p.y = 0.1f;
-        p.z = 0.1f;
-        p.intensity = 1.0f;
-        p.time = static_cast<float>(i) * 0.001f;
-        p.ring = 0;
-        cloud.push_back(p);
-    }
+    PointCloudType cloud;
+    cloud.points.push_back(MakePoint(1.0f, 0.0f, 0.0f, 50.0f, 1.5f));
+    cloud.points.push_back(MakePoint(2.0f, 0.0f, 0.0f, 60.0f, 3.0f));
 
-    PointCloudType::Ptr pcl_out(new PointCloudType());
-    preprocess_->Process(cloud, pcl_out);
+    PointCloudType::Ptr out(new PointCloudType);
+    preprocess_->Process(cloud, out);
 
-    // All points should be filtered out (within blind zone)
-    EXPECT_EQ(pcl_out->size(), 0u);
+    ASSERT_EQ(out->points.size(), 2u);
+    EXPECT_FLOAT_EQ(out->points[0].curvature, 1.5f);
+    EXPECT_FLOAT_EQ(out->points[1].curvature, 3.0f);
+    EXPECT_FLOAT_EQ(out->points[0].intensity, 50.0f);
+    EXPECT_FLOAT_EQ(out->points[1].intensity, 60.0f);
+}
+
+TEST_F(PointCloudPreprocessTest, EmptyCloudIsNoOp) {
+    PointCloudType cloud;
+    PointCloudType::Ptr out(new PointCloudType);
+    preprocess_->Process(cloud, out);
+    EXPECT_TRUE(out->points.empty());
+}
+
+TEST_F(PointCloudPreprocessTest, AccessorDefaults) {
+    PointCloudPreprocess fresh;
+    EXPECT_NEAR(fresh.Blind(), 0.01, 1e-9);
+    EXPECT_EQ(fresh.PointFilterNum(), 1);
+}
+
+TEST_F(PointCloudPreprocessTest, AccessorsRoundTrip) {
+    preprocess_->SetBlind(0.8);
+    preprocess_->SetPointFilterNum(5);
+    EXPECT_NEAR(preprocess_->Blind(), 0.8, 1e-9);
+    EXPECT_EQ(preprocess_->PointFilterNum(), 5);
 }

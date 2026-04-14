@@ -36,8 +36,7 @@ bool LaserMapping::Init(const std::string &config_yaml) {
 }
 
 bool LaserMapping::LoadParamsFromYAML(const std::string &yaml_file) {
-    // get params from yaml
-    int lidar_type, ivox_nearby_type;
+    int ivox_nearby_type;
     double gyr_cov, acc_cov, b_gyr_cov, b_acc_cov;
     double filter_size_surf_min;
     common::V3D lidar_T_wrt_IMU;
@@ -57,6 +56,9 @@ bool LaserMapping::LoadParamsFromYAML(const std::string &yaml_file) {
 
         num_max_iterations_ = yaml["max_iteration"].as<int>();
         esti_plane_threshold_ = yaml["esti_plane_threshold"].as<float>();
+        if (yaml["map_quality_threshold"]) {
+            map_quality_threshold_ = yaml["map_quality_threshold"].as<float>();
+        }
         options::NUM_MAX_ITERATIONS = num_max_iterations_;
         options::ESTI_PLANE_THRESHOLD = esti_plane_threshold_;
         time_sync_en_ = yaml["common"]["time_sync_en"].as<bool>();
@@ -69,14 +71,14 @@ bool LaserMapping::LoadParamsFromYAML(const std::string &yaml_file) {
         acc_cov = yaml["mapping"]["acc_cov"].as<float>();
         b_gyr_cov = yaml["mapping"]["b_gyr_cov"].as<float>();
         b_acc_cov = yaml["mapping"]["b_acc_cov"].as<float>();
-        preprocess_->SetBlind(yaml["preprocess"]["blind"].as<double>());
-        if (yaml["preprocess"]["time_scale"]) {
-            preprocess_->SetTimeScale(yaml["preprocess"]["time_scale"].as<float>());
+
+        // Preprocessing (sensor-agnostic). Only two knobs: blind distance
+        // and per-point downsampling stride.
+        if (yaml["preprocess"] && yaml["preprocess"]["blind"]) {
+            preprocess_->SetBlind(yaml["preprocess"]["blind"].as<double>());
         }
-        lidar_type = yaml["preprocess"]["lidar_type"].as<int>();
-        preprocess_->SetNumScans(yaml["preprocess"]["scan_line"].as<int>());
         preprocess_->SetPointFilterNum(yaml["point_filter_num"].as<int>());
-        preprocess_->SetFeatureEnabled(yaml["feature_extract_enable"].as<bool>());
+
         extrinsic_est_en_ = yaml["mapping"]["extrinsic_est_en"].as<bool>();
         pcd_save_en_ = yaml["pcd_save"]["pcd_save_en"].as<bool>();
         pcd_save_interval_ = yaml["pcd_save"]["interval"].as<int>();
@@ -87,30 +89,6 @@ bool LaserMapping::LoadParamsFromYAML(const std::string &yaml_file) {
         ivox_nearby_type = yaml["ivox_nearby_type"].as<int>();
     } catch (...) {
         spdlog::error("Failed to parse YAML config: invalid parameter type conversion");
-        return false;
-    }
-
-    spdlog::info("Lidar type: {}", lidar_type);
-    if (lidar_type == 1) {
-        preprocess_->SetLidarType(LidarType::AVIA);
-        spdlog::info("Using AVIA Lidar");
-    } else if (lidar_type == 2) {
-        preprocess_->SetLidarType(LidarType::VELO32);
-        spdlog::info("Using Velodyne 32 Lidar");
-    } else if (lidar_type == 3) {
-        preprocess_->SetLidarType(LidarType::OUST64);
-        spdlog::info("Using OUST 64 Lidar");
-    } else if (lidar_type == 4) {
-        preprocess_->SetLidarType(LidarType::HESAIxt32);
-        spdlog::info("Using Hesai Pandar 32 Lidar");
-    } else if (lidar_type == 5) {
-        preprocess_->SetLidarType(LidarType::ROBOSENSE);
-        spdlog::info("Using Robosense Lidar");
-    } else if (lidar_type == 6) {
-        preprocess_->SetLidarType(LidarType::LIVOX);
-        spdlog::info("Using Livox Lidar");
-    } else {
-        spdlog::warn("Unknown lidar_type: {}, expected 1-6", lidar_type);
         return false;
     }
 
@@ -201,67 +179,6 @@ void LaserMapping::AddPointCloud(const PointCloudType::Ptr &cloud, double timest
         "Preprocess (Generic)");
 }
 
-void LaserMapping::AddPointCloud(const LivoxCloud &cloud) {
-    std::lock_guard<std::mutex> lock(mtx_buffer_);
-    Timer::Evaluate(
-        [&, this]() {
-            scan_count_++;
-            double timestamp = cloud.timebase;
-            if (timestamp < last_timestamp_lidar_) {
-                spdlog::warn("Lidar timestamp went backwards, clearing lidar buffer");
-                lidar_buffer_.clear();
-            }
-
-            last_timestamp_lidar_ = timestamp;
-
-            if (!time_sync_en_ && abs(last_timestamp_imu_ - last_timestamp_lidar_) > 10.0 && !imu_buffer_.empty() &&
-                !lidar_buffer_.empty()) {
-                spdlog::info("IMU and LiDAR not Synced, IMU time: {}, lidar header time: {}",
-                             last_timestamp_imu_, last_timestamp_lidar_);
-            }
-
-            if (time_sync_en_ && !timediff_set_flg_ && abs(last_timestamp_lidar_ - last_timestamp_imu_) > 1 &&
-                !imu_buffer_.empty()) {
-                timediff_set_flg_ = true;
-                timediff_lidar_wrt_imu_ = last_timestamp_lidar_ + 0.1 - last_timestamp_imu_;
-                spdlog::info("Self sync IMU and LiDAR, time diff is {}", timediff_lidar_wrt_imu_);
-            }
-
-            auto ptr = std::make_shared<PointCloudType>();
-            preprocess_->Process(cloud, ptr);
-            lidar_buffer_.emplace_back(ptr);
-            time_buffer_.emplace_back(last_timestamp_lidar_);
-        },
-        "Preprocess (Livox)");
-}
-
-template <typename PointT>
-void LaserMapping::AddPointCloud(const pcl::PointCloud<PointT> &cloud, double timestamp) {
-    std::lock_guard<std::mutex> lock(mtx_buffer_);
-    Timer::Evaluate(
-        [&, this]() {
-            scan_count_++;
-            if (timestamp < last_timestamp_lidar_) {
-                spdlog::error("Lidar timestamp went backwards, clearing lidar buffer");
-                lidar_buffer_.clear();
-            }
-
-            auto ptr = std::make_shared<PointCloudType>();
-            preprocess_->Process(cloud, ptr);
-            lidar_buffer_.push_back(ptr);
-            time_buffer_.push_back(timestamp);
-            last_timestamp_lidar_ = timestamp;
-        },
-        "Preprocess (Standard)");
-}
-
-// Explicit template instantiations
-template void LaserMapping::AddPointCloud(const pcl::PointCloud<velodyne_pcl::Point> &, double);
-template void LaserMapping::AddPointCloud(const pcl::PointCloud<ouster_pcl::Point> &, double);
-template void LaserMapping::AddPointCloud(const pcl::PointCloud<hesai_pcl::Point> &, double);
-template void LaserMapping::AddPointCloud(const pcl::PointCloud<robosense_pcl::Point> &, double);
-template void LaserMapping::AddPointCloud(const pcl::PointCloud<livox_pcl::Point> &, double);
-
 PoseStamped LaserMapping::GetCurrentPose() const {
     std::lock_guard<std::mutex> lock(mtx_state_);
     return msg_body_pose_;
@@ -336,6 +253,7 @@ void LaserMapping::Run() {
     nearest_points_.resize(cur_pts);
     // No value-init needed: ObsModel writes every element of residuals_ and point_selected_surf_
     residuals_.resize(cur_pts);
+    fit_quality_.resize(cur_pts, 0.0f);
     point_selected_surf_.resize(cur_pts);
     plane_coef_.resize(cur_pts, common::V4F::Zero());
 
@@ -479,6 +397,15 @@ void LaserMapping::MapIncremental() {
 
         /* decide if need add to map */
         PointType &point_world = scan_down_world_->points[i];
+
+        // Dynamic point rejection: skip points whose map-plane fit quality
+        // is poor (high RMS residual among k-NN neighbors). These are likely
+        // on dynamic objects or at surface boundaries where the map is corrupted.
+        if (map_quality_threshold_ > 0.0f && point_selected_surf_[i] &&
+            fit_quality_[i] > map_quality_threshold_) {
+            return;  // actions[i] stays SKIP
+        }
+
         if (!nearest_points_[i].empty() && flg_EKF_inited_) {
             const PointVector &points_near = nearest_points_[i];
 
@@ -561,7 +488,8 @@ void LaserMapping::ObsModel(state_ikfom &s, esekfom::dyn_share_datastruct<double
                     point_selected_surf_[i] = points_near.size() >= options::MIN_NUM_MATCH_POINTS;
                     if (point_selected_surf_[i]) {
                         point_selected_surf_[i] =
-                            common::esti_plane(plane_coef_[i], points_near, esti_plane_threshold_);
+                            common::esti_plane(plane_coef_[i], points_near, esti_plane_threshold_,
+                                               &fit_quality_[i]);
                     }
                 }
 

@@ -17,7 +17,7 @@
 /// Supports both Livox binary (.bin) and PCD file inputs.
 /// Computes ATE (Absolute Trajectory Error) and RPE (Relative Pose Error).
 
-DEFINE_string(config_file, "./config/avia.yaml", "path to config file");
+DEFINE_string(config_file, "./config/default.yaml", "path to config file");
 DEFINE_string(lidar_dir, "", "directory containing LiDAR files (Livox .bin or .pcd, numbered from 0)");
 DEFINE_string(imu_file, "", "path to IMU CSV file (timestamp,ax,ay,az,gx,gy,gz)");
 DEFINE_string(ground_truth_file, "", "path to OptiTrack ground truth CSV");
@@ -76,34 +76,60 @@ std::vector<IMUEntry> LoadIMUCSV(const std::string &path) {
     return entries;
 }
 
-/// Load a Livox binary file produced by extract_bag.py.
+/// Load a Livox binary file produced by extract_bag.py and convert it
+/// directly to PointXYZINormal. Per-point offset_time (nanoseconds) becomes
+/// curvature (milliseconds) — the faster-lio internal convention.
+///
 /// Format: double timebase, uint32 point_num, uint8 lidar_id,
 ///         then point_num * {float x, float y, float z, uint8 reflectivity, uint8 tag, uint8 line, uint32 offset_time}
-faster_lio::LivoxCloud LoadLivoxBin(const std::string &path) {
-    faster_lio::LivoxCloud cloud;
+///
+/// Returns {cloud_ptr, timebase_seconds} or {nullptr, 0} on failure.
+std::pair<PointCloudType::Ptr, double> LoadLivoxBin(const std::string &path) {
     std::ifstream ifs(path, std::ios::binary);
     if (!ifs.is_open()) {
         spdlog::warn("Cannot open Livox file: {}", path);
-        return cloud;
+        return {nullptr, 0.0};
     }
 
-    ifs.read(reinterpret_cast<char *>(&cloud.timebase), sizeof(double));
-    ifs.read(reinterpret_cast<char *>(&cloud.point_num), sizeof(uint32_t));
-    ifs.read(reinterpret_cast<char *>(&cloud.lidar_id), sizeof(uint8_t));
+    double timebase;
+    uint32_t point_num;
+    uint8_t lidar_id;
+    ifs.read(reinterpret_cast<char *>(&timebase), sizeof(double));
+    ifs.read(reinterpret_cast<char *>(&point_num), sizeof(uint32_t));
+    ifs.read(reinterpret_cast<char *>(&lidar_id), sizeof(uint8_t));
 
-    cloud.points.resize(cloud.point_num);
-    for (uint32_t i = 0; i < cloud.point_num; i++) {
-        auto &p = cloud.points[i];
-        ifs.read(reinterpret_cast<char *>(&p.x), sizeof(float));
-        ifs.read(reinterpret_cast<char *>(&p.y), sizeof(float));
-        ifs.read(reinterpret_cast<char *>(&p.z), sizeof(float));
-        ifs.read(reinterpret_cast<char *>(&p.reflectivity), sizeof(uint8_t));
-        ifs.read(reinterpret_cast<char *>(&p.tag), sizeof(uint8_t));
-        ifs.read(reinterpret_cast<char *>(&p.line), sizeof(uint8_t));
-        ifs.read(reinterpret_cast<char *>(&p.offset_time), sizeof(uint32_t));
+    auto cloud = std::make_shared<PointCloudType>();
+    cloud->points.reserve(point_num);
+
+    for (uint32_t i = 0; i < point_num; i++) {
+        float x, y, z;
+        uint8_t reflectivity, tag, line;
+        uint32_t offset_time_ns;
+        ifs.read(reinterpret_cast<char *>(&x), sizeof(float));
+        ifs.read(reinterpret_cast<char *>(&y), sizeof(float));
+        ifs.read(reinterpret_cast<char *>(&z), sizeof(float));
+        ifs.read(reinterpret_cast<char *>(&reflectivity), sizeof(uint8_t));
+        ifs.read(reinterpret_cast<char *>(&tag), sizeof(uint8_t));
+        ifs.read(reinterpret_cast<char *>(&line), sizeof(uint8_t));
+        ifs.read(reinterpret_cast<char *>(&offset_time_ns), sizeof(uint32_t));
+
+        pcl::PointXYZINormal p;
+        p.x = x;
+        p.y = y;
+        p.z = z;
+        p.intensity = static_cast<float>(reflectivity);
+        p.normal_x = 0;
+        p.normal_y = 0;
+        p.normal_z = 0;
+        // offset_time is nanoseconds → curvature is milliseconds
+        p.curvature = static_cast<float>(offset_time_ns) * 1e-6f;
+        cloud->points.push_back(p);
     }
+    cloud->width = static_cast<uint32_t>(cloud->points.size());
+    cloud->height = 1;
+    cloud->is_dense = true;
 
-    return cloud;
+    return {cloud, timebase};
 }
 
 std::vector<double> LoadTimestamps(const std::string &path) {
@@ -345,61 +371,49 @@ int main(int argc, char **argv) {
     size_t imu_idx = 0;
 
     for (int scan_i = 0; scan_i < FLAGS_num_scans && !faster_lio::options::FLAG_EXIT; scan_i++) {
+        // Load the scan (either .bin with per-point timing or .pcd) and its timestamp.
+        PointCloudType::Ptr cloud;
+        double scan_timestamp;
+
         if (use_livox) {
             std::string livox_path = FLAGS_lidar_dir + "/" + std::to_string(scan_i) + ".bin";
-            faster_lio::LivoxCloud cloud = LoadLivoxBin(livox_path);
-            if (cloud.point_num == 0) {
+            auto [loaded, ts] = LoadLivoxBin(livox_path);
+            if (!loaded || loaded->empty()) {
                 spdlog::warn("Empty or missing Livox scan: {}", livox_path);
                 continue;
             }
-
-            double scan_timestamp = cloud.timebase;
-
-            // Feed IMU data up to this scan timestamp
-            while (imu_idx < imu_entries.size() && imu_entries[imu_idx].timestamp <= scan_timestamp) {
-                faster_lio::IMUData imu;
-                imu.timestamp = imu_entries[imu_idx].timestamp;
-                imu.linear_acceleration =
-                    Eigen::Vector3d(imu_entries[imu_idx].ax, imu_entries[imu_idx].ay, imu_entries[imu_idx].az);
-                imu.angular_velocity =
-                    Eigen::Vector3d(imu_entries[imu_idx].gx, imu_entries[imu_idx].gy, imu_entries[imu_idx].gz);
-                laser_mapping->AddIMU(imu);
-                imu_idx++;
-            }
-
-            laser_mapping->AddPointCloud(cloud);
+            cloud = loaded;
+            scan_timestamp = ts;
         } else {
             std::string pcd_path = FLAGS_lidar_dir + "/" + std::to_string(scan_i) + ".pcd";
-            pcl::PointCloud<pcl::PointXYZINormal>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZINormal>());
+            cloud = std::make_shared<PointCloudType>();
             if (pcl::io::loadPCDFile(pcd_path, *cloud) == -1) {
                 spdlog::warn("Cannot load PCD file: {}", pcd_path);
                 continue;
             }
 
-            double pcd_timestamp;
             if (scan_i < static_cast<int>(scan_timestamps.size())) {
-                pcd_timestamp = scan_timestamps[scan_i];
+                scan_timestamp = scan_timestamps[scan_i];
             } else if (!imu_entries.empty() && imu_idx < imu_entries.size()) {
-                pcd_timestamp = imu_entries[std::min(imu_idx + 10, imu_entries.size() - 1)].timestamp;
+                scan_timestamp = imu_entries[std::min(imu_idx + 10, imu_entries.size() - 1)].timestamp;
             } else {
-                pcd_timestamp = scan_i * 0.1;
+                scan_timestamp = scan_i * 0.1;
             }
-
-            while (imu_idx < imu_entries.size() && imu_entries[imu_idx].timestamp <= pcd_timestamp) {
-                faster_lio::IMUData imu;
-                imu.timestamp = imu_entries[imu_idx].timestamp;
-                imu.linear_acceleration =
-                    Eigen::Vector3d(imu_entries[imu_idx].ax, imu_entries[imu_idx].ay, imu_entries[imu_idx].az);
-                imu.angular_velocity =
-                    Eigen::Vector3d(imu_entries[imu_idx].gx, imu_entries[imu_idx].gy, imu_entries[imu_idx].gz);
-                laser_mapping->AddIMU(imu);
-                imu_idx++;
-            }
-
-            PointCloudType::Ptr pcl_cloud(new PointCloudType());
-            *pcl_cloud = *cloud;
-            laser_mapping->AddPointCloud(pcl_cloud, pcd_timestamp);
         }
+
+        // Feed IMU samples up to this scan's timestamp.
+        while (imu_idx < imu_entries.size() && imu_entries[imu_idx].timestamp <= scan_timestamp) {
+            faster_lio::IMUData imu;
+            imu.timestamp = imu_entries[imu_idx].timestamp;
+            imu.linear_acceleration =
+                Eigen::Vector3d(imu_entries[imu_idx].ax, imu_entries[imu_idx].ay, imu_entries[imu_idx].az);
+            imu.angular_velocity =
+                Eigen::Vector3d(imu_entries[imu_idx].gx, imu_entries[imu_idx].gy, imu_entries[imu_idx].gz);
+            laser_mapping->AddIMU(imu);
+            imu_idx++;
+        }
+
+        laser_mapping->AddPointCloud(cloud, scan_timestamp);
 
         faster_lio::Timer::Evaluate([&laser_mapping]() { laser_mapping->Run(); }, "Laser Mapping Single Run");
     }

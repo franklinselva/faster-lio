@@ -30,34 +30,6 @@ TEST(TypesTest, Pose6DDefaultConstruction) {
     EXPECT_DOUBLE_EQ(pose.rot[8], 1.0);
 }
 
-TEST(TypesTest, LivoxPointConstruction) {
-    LivoxPoint p;
-    p.x = 1.0f;
-    p.y = 2.0f;
-    p.z = 3.0f;
-    p.reflectivity = 128;
-    p.tag = 0x10;
-    p.line = 2;
-    p.offset_time = 1000;
-
-    EXPECT_FLOAT_EQ(p.x, 1.0f);
-    EXPECT_EQ(p.reflectivity, 128);
-    EXPECT_EQ(p.tag, 0x10);
-    EXPECT_EQ(p.offset_time, 1000u);
-}
-
-TEST(TypesTest, LivoxCloudConstruction) {
-    LivoxCloud cloud;
-    cloud.timebase = 100.0;
-    cloud.point_num = 2;
-    cloud.points.resize(2);
-    cloud.points[0].x = 1.0f;
-    cloud.points[1].x = 2.0f;
-
-    EXPECT_EQ(cloud.points.size(), 2u);
-    EXPECT_FLOAT_EQ(cloud.points[0].x, 1.0f);
-}
-
 TEST(TypesTest, PoseStampedConstruction) {
     PoseStamped ps;
     EXPECT_DOUBLE_EQ(ps.timestamp, 0.0);

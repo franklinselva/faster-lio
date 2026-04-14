@@ -151,9 +151,19 @@ inline float calc_dist(const PointType &p1, const PointType &p2) {
 
 inline float calc_dist(const Eigen::Vector3f &p1, const Eigen::Vector3f &p2) { return (p1 - p2).squaredNorm(); }
 
+/// Fit a plane to k-NN points and compute fit quality.
+///
+/// Solves n·p + 1 = 0 via least-squares, then checks each neighbor's
+/// residual against `threshold`. Returns false if any neighbor exceeds it.
+///
+/// `fit_quality` (output): RMS of per-neighbor residuals. Lower = better plane.
+/// This is always written (even on failure) so callers can inspect the quality
+/// of rejected fits. A value of 0 means perfect coplanarity.
 template <typename T>
-inline bool esti_plane(Eigen::Matrix<T, 4, 1> &pca_result, const PointVector &point, const T &threshold = 0.1f) {
+inline bool esti_plane(Eigen::Matrix<T, 4, 1> &pca_result, const PointVector &point,
+                       const T &threshold = 0.1f, T *fit_quality = nullptr) {
     if (point.size() < options::MIN_NUM_MATCH_POINTS) {
+        if (fit_quality) *fit_quality = std::numeric_limits<T>::max();
         return false;
     }
 
@@ -173,7 +183,6 @@ inline bool esti_plane(Eigen::Matrix<T, 4, 1> &pca_result, const PointVector &po
             A(j, 2) = point[j].z;
         }
 
-        // householderQr avoids pivoting overhead; the 5x3 system is well-conditioned
         normvec = A.householderQr().solve(b);
     } else {
         Eigen::MatrixXd A(point.size(), 3);
@@ -201,14 +210,23 @@ inline bool esti_plane(Eigen::Matrix<T, 4, 1> &pca_result, const PointVector &po
     pca_result(2) = normvec(2) / n;
     pca_result(3) = 1.0 / n;
 
+    // Compute per-neighbor residuals and RMS fit quality
+    T sum_sq = 0;
+    bool all_pass = true;
     for (const auto &p : point) {
         Eigen::Matrix<T, 4, 1> temp = p.getVector4fMap();
         temp[3] = 1.0;
-        if (fabs(pca_result.dot(temp)) > threshold) {
-            return false;
+        T res = fabs(pca_result.dot(temp));
+        sum_sq += res * res;
+        if (res > threshold) {
+            all_pass = false;
         }
     }
-    return true;
+
+    if (fit_quality) {
+        *fit_quality = std::sqrt(sum_sq / static_cast<T>(point.size()));
+    }
+    return all_pass;
 }
 
 }  // namespace faster_lio::common

@@ -68,11 +68,11 @@ cd build && ctest --output-on-failure
 The `run_mapping` example reads PCD files and an IMU CSV offline:
 
 ```bash
-just example ./config/avia.yaml
+just example ./config/default.yaml
 
 # or directly:
 ./build/run_mapping \
-    --config_file ./config/avia.yaml \
+    --config_file ./config/default.yaml \
     --pcd_dir /path/to/pcds \
     --imu_file /path/to/imu.csv \
     --num_pcd 100
@@ -86,7 +86,7 @@ Include the umbrella header and link against `faster_lio`:
 #include <faster_lio/faster_lio.h>
 
 faster_lio::LaserMapping mapping;
-mapping.Init("config/avia.yaml");
+mapping.Init("config/default.yaml");
 
 // Feed sensor data
 mapping.AddIMU(imu_data);
@@ -108,18 +108,10 @@ target_link_libraries(your_target PRIVATE faster_lio)
 
 ## Configuration
 
-YAML config files are provided for supported sensors under `config/`:
-
-| File             | Sensor          |
-| ---------------- | --------------- |
-| `avia.yaml`      | Livox AVIA      |
-| `livox.yaml`     | Livox (generic) |
-| `mid360.yaml`    | Livox Mid-360   |
-| `horizon.yaml`   | Livox Horizon   |
-| `velodyne.yaml`  | Velodyne 32     |
-| `ouster64.yaml`  | Ouster OS1-64   |
-| `hesai.yaml`     | Hesai XT32      |
-| `robosense.yaml` | RoboSense       |
+A single reference config lives at `config/default.yaml`. The algorithm is
+sensor-agnostic — it operates on generic `PointXYZINormal` clouds, so there
+are no per-LiDAR-brand knobs. Callers override parameters (extrinsics,
+blind zone, voxel sizes) in their own config files as needed.
 
 Key parameters:
 

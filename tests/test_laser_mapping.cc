@@ -14,13 +14,13 @@ class LaserMappingTest : public ::testing::Test {
 
 TEST_F(LaserMappingTest, InitFromYAML) {
     // Test initialization with the sample config
-    std::string config = std::string(ROOT_DIR) + "config/avia.yaml";
+    std::string config = std::string(ROOT_DIR) + "config/default.yaml";
     bool result = mapping_->Init(config);
     EXPECT_TRUE(result);
 }
 
 TEST_F(LaserMappingTest, AddIMUDoesNotCrash) {
-    std::string config = std::string(ROOT_DIR) + "config/avia.yaml";
+    std::string config = std::string(ROOT_DIR) + "config/default.yaml";
     ASSERT_TRUE(mapping_->Init(config));
 
     IMUData imu;
@@ -33,7 +33,7 @@ TEST_F(LaserMappingTest, AddIMUDoesNotCrash) {
 }
 
 TEST_F(LaserMappingTest, GetCurrentPoseDefault) {
-    std::string config = std::string(ROOT_DIR) + "config/avia.yaml";
+    std::string config = std::string(ROOT_DIR) + "config/default.yaml";
     ASSERT_TRUE(mapping_->Init(config));
 
     PoseStamped pose = mapping_->GetCurrentPose();
@@ -42,7 +42,7 @@ TEST_F(LaserMappingTest, GetCurrentPoseDefault) {
 }
 
 TEST_F(LaserMappingTest, GetTrajectoryEmpty) {
-    std::string config = std::string(ROOT_DIR) + "config/avia.yaml";
+    std::string config = std::string(ROOT_DIR) + "config/default.yaml";
     ASSERT_TRUE(mapping_->Init(config));
 
     const auto &traj = mapping_->GetTrajectory();
@@ -50,7 +50,7 @@ TEST_F(LaserMappingTest, GetTrajectoryEmpty) {
 }
 
 TEST_F(LaserMappingTest, SyncPackagesReturnsFalseWhenEmpty) {
-    std::string config = std::string(ROOT_DIR) + "config/avia.yaml";
+    std::string config = std::string(ROOT_DIR) + "config/default.yaml";
     ASSERT_TRUE(mapping_->Init(config));
 
     // No data added, sync should return false
@@ -58,7 +58,7 @@ TEST_F(LaserMappingTest, SyncPackagesReturnsFalseWhenEmpty) {
 }
 
 TEST_F(LaserMappingTest, RunReturnsEarlyWhenNoData) {
-    std::string config = std::string(ROOT_DIR) + "config/avia.yaml";
+    std::string config = std::string(ROOT_DIR) + "config/default.yaml";
     ASSERT_TRUE(mapping_->Init(config));
 
     // Run with no data should not crash

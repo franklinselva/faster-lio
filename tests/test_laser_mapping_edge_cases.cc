@@ -8,7 +8,7 @@ class LaserMappingEdgeTest : public ::testing::Test {
    protected:
     void SetUp() override {
         mapping_ = std::make_shared<LaserMapping>();
-        config_path_ = std::string(ROOT_DIR) + "config/avia.yaml";
+        config_path_ = std::string(ROOT_DIR) + "config/default.yaml";
     }
 
     std::shared_ptr<LaserMapping> mapping_;
@@ -56,10 +56,7 @@ TEST_F(LaserMappingEdgeTest, MinimalYAMLConfig) {
         f << "common:\n";
         f << "  time_sync_en: false\n";
         f << "preprocess:\n";
-        f << "  lidar_type: 1\n";
-        f << "  scan_line: 6\n";
         f << "  blind: 4\n";
-        f << "  time_scale: 1e-3\n";
         f << "mapping:\n";
         f << "  acc_cov: 0.1\n";
         f << "  gyr_cov: 0.1\n";
@@ -76,7 +73,6 @@ TEST_F(LaserMappingEdgeTest, MinimalYAMLConfig) {
         f << "pcd_save:\n";
         f << "  pcd_save_en: false\n";
         f << "  interval: -1\n";
-        f << "feature_extract_enable: false\n";
         f << "point_filter_num: 3\n";
         f << "max_iteration: 4\n";
         f << "filter_size_surf: 0.5\n";
@@ -273,27 +269,27 @@ TEST_F(LaserMappingEdgeTest, FinishWithoutInit) {
     SUCCEED();
 }
 
-// --- AddPointCloud with LivoxCloud ---
+// --- AddPointCloud with generic PointCloudType ---
 
-TEST_F(LaserMappingEdgeTest, AddLivoxCloud) {
+TEST_F(LaserMappingEdgeTest, AddGenericPointCloud) {
     ASSERT_TRUE(mapping_->Init(config_path_));
 
-    LivoxCloud cloud;
-    cloud.timebase = 1.0;
-    cloud.point_num = 10;
-    cloud.points.resize(10);
-
+    auto cloud = std::make_shared<PointCloudType>();
+    cloud->points.reserve(10);
     for (int i = 0; i < 10; i++) {
-        cloud.points[i].x = static_cast<float>(i) + 5.0f;
-        cloud.points[i].y = 1.0f;
-        cloud.points[i].z = 1.0f;
-        cloud.points[i].reflectivity = 128;
-        cloud.points[i].tag = 0x10;
-        cloud.points[i].line = i % 6;
-        cloud.points[i].offset_time = i * 1000000;
+        PointType p;
+        p.x = static_cast<float>(i) + 5.0f;
+        p.y = 1.0f;
+        p.z = 1.0f;
+        p.intensity = 128.0f;
+        p.normal_x = p.normal_y = p.normal_z = 0.0f;
+        p.curvature = static_cast<float>(i) * 10.0f;  // ms from scan start
+        cloud->points.push_back(p);
     }
+    cloud->width = cloud->points.size();
+    cloud->height = 1;
 
-    mapping_->AddPointCloud(cloud);
+    mapping_->AddPointCloud(cloud, 1.0);
     SUCCEED();
 }
 

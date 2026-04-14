@@ -28,23 +28,6 @@ struct Pose6D {
     std::array<double, 9> rot = {1, 0, 0, 0, 1, 0, 0, 0, 1};
 };
 
-struct LivoxPoint {
-    float x = 0;
-    float y = 0;
-    float z = 0;
-    uint8_t reflectivity = 0;
-    uint8_t tag = 0;
-    uint8_t line = 0;
-    uint32_t offset_time = 0;
-};
-
-struct LivoxCloud {
-    double timebase = 0.0;
-    uint32_t point_num = 0;
-    uint8_t lidar_id = 0;
-    std::vector<LivoxPoint> points;
-};
-
 struct Pose {
     Eigen::Vector3d position = Eigen::Vector3d::Zero();
     Eigen::Quaterniond orientation = Eigen::Quaterniond::Identity();

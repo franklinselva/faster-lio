@@ -1,0 +1,54 @@
+# faster-lio reference configuration
+#
+# Algorithm-only parameters — sensor-agnostic. The library operates on
+# generic PointXYZINormal clouds, so there are no LiDAR-brand knobs.
+#
+# Per-installation overrides (extrinsics, environment-specific tunings)
+# should live in the caller's config, not here.
+
+common:
+  time_sync_en: false          # auto-sync LiDAR/IMU clocks if drift > 1s
+
+# ── Preprocessing ──────────────────────────────────────────────────────
+preprocess:
+  blind: 0.5                   # discard points within this range (m)
+
+# ── IEKF state estimation ──────────────────────────────────────────────
+mapping:
+  acc_cov: 0.1                 # accelerometer process noise (m/s²²/Hz)
+  gyr_cov: 0.1                 # gyroscope process noise (rad/s²/Hz)
+  b_acc_cov: 0.0001            # accelerometer bias random walk
+  b_gyr_cov: 0.0001            # gyroscope bias random walk
+  det_range: 100.0             # max LiDAR range used for matching (m)
+  extrinsic_est_en: true       # online refinement of LiDAR↔IMU extrinsic
+
+  # LiDAR pose in IMU frame — override per installation.
+  extrinsic_T: [0, 0, 0]
+  extrinsic_R: [1, 0, 0,
+                0, 1, 0,
+                0, 0, 1]
+
+# ── Map and matching ───────────────────────────────────────────────────
+point_filter_num: 1            # keep every Nth point (1 = no downsampling)
+max_iteration: 3               # IEKF inner iterations per scan
+filter_size_surf: 0.5          # voxel filter on input scan (m)
+filter_size_map: 0.5           # voxel filter on map insertion (m)
+cube_side_length: 1000         # iVox map extent (m)
+
+ivox_grid_resolution: 0.5      # iVox voxel leaf size (m)
+ivox_nearby_type: 18           # 6, 18, or 26 neighbor voxels
+esti_plane_threshold: 0.1      # k-NN plane-fit residual threshold (m)
+
+# Reject points with poor k-NN plane fit from map insertion.
+# Must be ≤ esti_plane_threshold. Set to 0 to disable.
+map_quality_threshold: 0.08
+
+# ── Output ─────────────────────────────────────────────────────────────
+output:
+  path_en: false               # publish running path
+  dense_en: false              # publish full-density map
+  path_save_en: true           # save trajectory to disk on Finish()
+
+pcd_save:
+  pcd_save_en: false           # save accumulated map as PCD
+  interval: -1                 # -1 = save once at end

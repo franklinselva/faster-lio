@@ -11,7 +11,7 @@
 
 /// run faster-LIO in offline mode: reads PCD files + IMU CSV, feeds data through the API
 
-DEFINE_string(config_file, "./config/avia.yaml", "path to config file");
+DEFINE_string(config_file, "./config/default.yaml", "path to config file");
 DEFINE_string(pcd_dir, "", "directory containing PCD files (numbered: 0.pcd, 1.pcd, ...)");
 DEFINE_string(imu_file, "", "path to IMU CSV file (timestamp,ax,ay,az,gx,gy,gz)");
 DEFINE_string(time_log_file, "./Log/time.log", "path to time log file");

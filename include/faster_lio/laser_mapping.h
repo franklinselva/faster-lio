@@ -41,10 +41,6 @@ class LaserMapping {
     // input API — thread-safe, can be called from sensor callback threads
     void AddIMU(const IMUData &imu);
     void AddPointCloud(const PointCloudType::Ptr &cloud, double timestamp);
-    void AddPointCloud(const LivoxCloud &cloud);
-
-    template <typename PointT>
-    void AddPointCloud(const pcl::PointCloud<PointT> &cloud, double timestamp);
 
     // output API — thread-safe, can be called concurrently with Run()
     PoseStamped GetCurrentPose() const;
@@ -112,6 +108,7 @@ class LaserMapping {
     common::VV4F corr_norm_;                          // inlier plane norms
     pcl::VoxelGrid<PointType> voxel_scan_;            // voxel filter for current scan
     std::vector<float> residuals_;                    // point-to-plane residuals
+    std::vector<float> fit_quality_;                  // per-point plane fit RMS (lower = better)
     std::vector<char> point_selected_surf_;           // selected points
     common::VV4F plane_coef_;                         // plane coeffs
 
@@ -128,6 +125,7 @@ class LaserMapping {
     /// options
     int num_max_iterations_ = 4;
     float esti_plane_threshold_ = 0.1f;
+    float map_quality_threshold_ = 0.0f;  // 0 = disabled; points with fit_quality > this are excluded from map
     bool time_sync_en_ = false;
     double timediff_lidar_wrt_imu_ = 0.0;
     double last_timestamp_lidar_ = 0;
