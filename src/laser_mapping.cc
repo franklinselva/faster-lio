@@ -133,6 +133,26 @@ bool LaserMapping::LoadParamsFromYAML(const std::string &yaml_file) {
         p_imu_->SetInitMotionGate(en, acc_rel_thresh, gyr_thresh, min_accepted, max_tries);
     }
 
+    // Optional: wheel-odometry fusion. Off by default → no path change.
+    if (yaml["wheel"]) {
+        const auto &w = yaml["wheel"];
+        wheel_enabled_      = w["enabled"]         ? w["enabled"].as<bool>()           : false;
+        wheel_cov_v_x_      = w["cov_v_x"]         ? w["cov_v_x"].as<double>()         : 0.01;
+        wheel_cov_v_y_      = w["cov_v_y"]         ? w["cov_v_y"].as<double>()         : 0.01;
+        wheel_cov_v_z_      = w["cov_v_z"]         ? w["cov_v_z"].as<double>()         : 0.001;
+        wheel_cov_omega_z_  = w["cov_omega_z"]     ? w["cov_omega_z"].as<double>()     : 0.01;
+        wheel_emit_nhc_v_y_ = w["emit_nhc_v_y"]    ? w["emit_nhc_v_y"].as<bool>()      : true;
+        wheel_emit_nhc_v_z_ = w["emit_nhc_v_z"]    ? w["emit_nhc_v_z"].as<bool>()      : true;
+        wheel_nhc_cov_      = w["nhc_cov"]         ? w["nhc_cov"].as<double>()         : 0.001;
+        wheel_max_time_gap_ = w["max_time_gap"]    ? w["max_time_gap"].as<double>()    : 0.05;
+        if (wheel_enabled_) {
+            spdlog::info("Wheel odometry ENABLED: cov_v_x={:.4f} cov_v_y={:.4f} cov_v_z={:.5f} "
+                         "nhc_y={} nhc_z={} nhc_cov={:.5f} max_gap={:.3f}s",
+                         wheel_cov_v_x_, wheel_cov_v_y_, wheel_cov_v_z_,
+                         wheel_emit_nhc_v_y_, wheel_emit_nhc_v_z_, wheel_nhc_cov_, wheel_max_time_gap_);
+        }
+    }
+
     return true;
 }
 
@@ -196,6 +216,26 @@ void LaserMapping::AddPointCloud(const PointCloudType::Ptr &cloud, double timest
             }
         },
         "Preprocess (Generic)");
+}
+
+void LaserMapping::AddWheelOdom(const WheelOdomData &odom) {
+    // Always accept into the queue, regardless of wheel_enabled_. If the
+    // fusion is off, ApplyWheelObservations will short-circuit and the
+    // queue drains anyway (prevents stale data when fusion is toggled).
+    if (odom.timestamp <= 0.0) {
+        spdlog::warn("Wheel odom has invalid timestamp ({}), dropping", odom.timestamp);
+        return;
+    }
+    if (last_timestamp_wheel_ > 0.0 && odom.timestamp < last_timestamp_wheel_) {
+        spdlog::warn("Wheel odom timestamp went backwards ({} < {}), dropping",
+                     odom.timestamp, last_timestamp_wheel_);
+        return;
+    }
+    last_timestamp_wheel_ = odom.timestamp;
+    auto msg = std::make_shared<WheelOdomData>(odom);
+    if (!wheel_queue_.try_push(msg)) {
+        spdlog::warn("Wheel queue full (cap={}), dropping sample", kWheelQueueCapacity);
+    }
 }
 
 PoseStamped LaserMapping::GetCurrentPose() const {
@@ -300,6 +340,8 @@ void LaserMapping::Run() {
         [&, this]() {
             double solve_H_time = 0;
             kf_.update_iterated_dyn_share_modified(options::LASER_POINT_COV, solve_H_time);
+            // Optional: wheel-odom sequential update. No-op when disabled.
+            ApplyWheelObservations(lidar_end_time_);
             state_point_ = kf_.get_x();
             euler_cur_ = SO3ToEuler(state_point_.rot);
             pos_lidar_ = state_point_.pos + state_point_.rot * state_point_.offset_T_L_I;
@@ -882,5 +924,100 @@ void LaserMapping::WriteDiagnosticsRow() {
         << rss_mb << "," << cpu_delta_us << "\n";
 }
 #endif
+
+// =====================================================================
+// Wheel-odometry fusion (optional, opt-in via yaml `wheel.enabled`).
+// =====================================================================
+// Applied as a sequential Kalman update AFTER the LiDAR IEKF converges.
+// Each observation component is a scalar body-frame velocity:
+//   z = (R_wb^T · v_world)[axis]
+// Jacobian rows (nonzero only at rot δθ block 3..5 and vel block 12..14):
+//   ∂z/∂δθ    = [v_body]×  [axis, :]
+//   ∂z/∂v_world = R_wb^T   [axis, :]
+// All other state components (pos, offsets, biases, gravity) carry zero
+// in H, so the update touches only the (rot, vel) sub-blocks of the
+// covariance and state. The cov update uses Joseph form for numerical
+// stability under small-R scenarios (e.g. nhc_cov = 1e-3).
+
+void LaserMapping::DrainWheelQueue() {
+    while (auto p = wheel_queue_.front()) {
+        wheel_buffer_.push_back(*p);
+        wheel_queue_.pop();
+    }
+}
+
+WheelOdomData::Ptr LaserMapping::FindWheelObs(double target_time) const {
+    WheelOdomData::Ptr best;
+    double best_gap = std::numeric_limits<double>::infinity();
+    for (const auto &w : wheel_buffer_) {
+        const double gap = std::fabs(w->timestamp - target_time);
+        if (gap < best_gap) {
+            best_gap = gap;
+            best = w;
+        }
+    }
+    if (!best || best_gap > wheel_max_time_gap_) return nullptr;
+    return best;
+}
+
+void LaserMapping::ApplyBodyVelScalarUpdate(int axis, double z_body, double R_obs) {
+    // Delegate to the pure-math helper in wheel_fusion.h. Keeping the math
+    // outside this class keeps it independently testable without friend access.
+    state_ikfom x = kf_.get_x();
+    wheel_fusion::StateCov P = kf_.get_P();
+    const auto rep = wheel_fusion::ApplyScalarBodyVelUpdate(x, P, axis, z_body, R_obs);
+    if (rep.updated) {
+        kf_.change_x(x);
+        kf_.change_P(P);
+        return;
+    }
+    switch (rep.status) {
+        case wheel_fusion::ScalarUpdateReport::Status::InvalidAxis:
+            spdlog::warn("Wheel update: invalid axis {}", axis);
+            break;
+        case wheel_fusion::ScalarUpdateReport::Status::NonPositiveR:
+            spdlog::warn("Wheel update: non-positive R_obs ({})", R_obs);
+            break;
+        case wheel_fusion::ScalarUpdateReport::Status::NonFiniteInnov:
+            spdlog::warn("Wheel update: non-finite innovation cov {}", rep.innov_cov);
+            break;
+        case wheel_fusion::ScalarUpdateReport::Status::GatedByMahalanobis:
+            spdlog::warn("Wheel obs rejected (axis={}, mahalanobis²={:.2f}, z={} residual={})",
+                         axis, rep.mahalanobis2, z_body, rep.residual);
+            break;
+        default:
+            break;
+    }
+}
+
+void LaserMapping::ApplyWheelObservations(double lidar_end_time) {
+    if (!wheel_enabled_) return;
+    DrainWheelQueue();
+
+    WheelOdomData::Ptr obs = FindWheelObs(lidar_end_time);
+
+    // GC stale wheel samples (> 1 s past the current frame) to cap memory.
+    while (!wheel_buffer_.empty() &&
+           wheel_buffer_.front()->timestamp < lidar_end_time - 1.0) {
+        wheel_buffer_.pop_front();
+    }
+
+    const bool has_y = obs && obs->v_body_y.has_value();
+    const bool has_z = obs && obs->v_body_z.has_value();
+    // omega_z observation not yet integrated — see design note. The gyro
+    // is a better source. Fields are accepted but no update is applied.
+
+    if (obs) {
+        ApplyBodyVelScalarUpdate(0, obs->v_body_x, wheel_cov_v_x_);
+        if (has_y) ApplyBodyVelScalarUpdate(1, *obs->v_body_y, wheel_cov_v_y_);
+        if (has_z) ApplyBodyVelScalarUpdate(2, *obs->v_body_z, wheel_cov_v_z_);
+    }
+
+    // Non-holonomic virtual observations for axes NOT supplied by the
+    // wheel message. Emitting these when `has_y`/`has_z` would double-count
+    // the lateral velocity with contradictory measurements.
+    if (wheel_emit_nhc_v_y_ && !has_y) ApplyBodyVelScalarUpdate(1, 0.0, wheel_nhc_cov_);
+    if (wheel_emit_nhc_v_z_ && !has_z) ApplyBodyVelScalarUpdate(2, 0.0, wheel_nhc_cov_);
+}
 
 }  // namespace faster_lio

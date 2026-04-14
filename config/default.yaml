@@ -44,6 +44,29 @@ imu_init:
   min_accepted: 50             # samples that pass the gate before init completes
   max_tries: 1000              # ~5 s fail-soft cap at 200 Hz IMU
 
+# ── Wheel odometry fusion ──────────────────────────────────────────────
+# Optional body-frame velocity observations applied as sequential scalar
+# Kalman updates AFTER the LiDAR IEKF converges. Chassis-agnostic: the
+# caller (AddWheelOdom) fills only the components its chassis measures.
+# Block absent or `enabled: false` preserves legacy LiDAR-only behavior.
+#
+# NHC = non-holonomic virtual observation. Emit v_y = 0 / v_z = 0 at the
+# frame time, independent of the wheel message. KINEMATIC ASSUMPTION
+# only — enable for chassis that physically cannot move on that axis.
+#   diff / Ackermann / skid-steer: emit_nhc_v_y=true,  emit_nhc_v_z=true
+#   omni / mecanum / 4WS:          emit_nhc_v_y=false, emit_nhc_v_z=true
+#   drone / aquatic:               emit_nhc_v_y=false, emit_nhc_v_z=false
+# wheel:
+#   enabled: false
+#   cov_v_x: 0.01                # (m/s)^2 body-frame forward velocity obs noise
+#   cov_v_y: 0.01                # used only if AddWheelOdom provides v_body_y
+#   cov_v_z: 0.001               # used only if AddWheelOdom provides v_body_z
+#   cov_omega_z: 0.01            # reserved (not yet wired into the update)
+#   emit_nhc_v_y: true
+#   emit_nhc_v_z: true
+#   nhc_cov: 0.001               # (m/s)^2 covariance for the NHC virtual obs
+#   max_time_gap: 0.05           # reject wheel samples older than this vs lidar_end_time
+
 # ── Map and matching ───────────────────────────────────────────────────
 point_filter_num: 1            # keep every Nth point (1 = no downsampling)
 max_iteration: 3               # IEKF inner iterations per scan

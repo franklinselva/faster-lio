@@ -14,6 +14,7 @@
 #include "faster_lio/imu_processing.h"
 #include "ivox3d/ivox3d.h"
 #include "faster_lio/pointcloud_preprocess.h"
+#include "faster_lio/wheel_fusion.h"
 
 namespace faster_lio {
 
@@ -48,6 +49,10 @@ class LaserMapping {
     // input API — thread-safe, can be called from sensor callback threads
     void AddIMU(const IMUData &imu);
     void AddPointCloud(const PointCloudType::Ptr &cloud, double timestamp);
+    /// Optional wheel-odometry observation. Caller fills a `WheelOdomData`
+    /// with whichever body-frame velocity components its chassis can
+    /// measure (see types.h). No-op unless `wheel.enabled: true` in yaml.
+    void AddWheelOdom(const WheelOdomData &odom);
 
     // output API — thread-safe, can be called concurrently with Run()
     PoseStamped GetCurrentPose() const;
@@ -141,8 +146,10 @@ class LaserMapping {
     };
     static constexpr size_t kImuQueueCapacity   = 1024;
     static constexpr size_t kLidarQueueCapacity = 128;
-    rigtorp::SPSCQueue<IMUData::Ptr>  imu_queue_{kImuQueueCapacity};
-    rigtorp::SPSCQueue<LidarItem>     lidar_queue_{kLidarQueueCapacity};
+    static constexpr size_t kWheelQueueCapacity = 512;
+    rigtorp::SPSCQueue<IMUData::Ptr>        imu_queue_{kImuQueueCapacity};
+    rigtorp::SPSCQueue<LidarItem>           lidar_queue_{kLidarQueueCapacity};
+    rigtorp::SPSCQueue<WheelOdomData::Ptr>  wheel_queue_{kWheelQueueCapacity};
 
     /// Consumer-side scratch deques. SyncPackages drains the SPSC queues
     /// into these at the start of each Run() tick, then applies the
@@ -150,6 +157,7 @@ class LaserMapping {
     std::deque<IMUData::Ptr>         imu_buffer_;
     std::deque<PointCloudType::Ptr>  lidar_buffer_;
     std::deque<double>               time_buffer_;
+    std::deque<WheelOdomData::Ptr>   wheel_buffer_;
 
     /// options
     int num_max_iterations_ = 4;
@@ -174,6 +182,30 @@ class LaserMapping {
     int scan_num_ = 0;
     bool timediff_set_flg_ = false;
     int effect_feat_num_ = 0, frame_num_ = 0;
+
+    /// Wheel-odometry fusion (optional; gated by yaml `wheel.enabled`).
+    /// When enabled, a scalar body-frame velocity Kalman update is applied
+    /// per present observation component AFTER the LiDAR IEKF update.
+    bool   wheel_enabled_          = false;
+    double wheel_cov_v_x_          = 0.01;
+    double wheel_cov_v_y_          = 0.01;
+    double wheel_cov_v_z_          = 0.001;
+    double wheel_cov_omega_z_      = 0.01;
+    bool   wheel_emit_nhc_v_y_     = true;
+    bool   wheel_emit_nhc_v_z_     = true;
+    double wheel_nhc_cov_          = 0.001;
+    double wheel_max_time_gap_     = 0.05;
+    double last_timestamp_wheel_   = -1.0;
+
+    // Accepts a body-frame scalar velocity observation on axis k∈{0,1,2}
+    // and applies one Joseph-form Kalman update to kf_ (manual, manifold-aware).
+    void ApplyBodyVelScalarUpdate(int axis, double z_body, double R_obs);
+    // Drains wheel_queue_ → wheel_buffer_; picks the sample closest to
+    // `lidar_end_time` within `wheel_max_time_gap_`; applies scalar updates
+    // for all present components plus NHC virtual observations.
+    void DrainWheelQueue();
+    WheelOdomData::Ptr FindWheelObs(double target_time) const;
+    void ApplyWheelObservations(double lidar_end_time);
 
     ///////////////////////// EKF inputs and output ///////////////////////////////////////////////////////
     common::MeasureGroup measures_;                    // sync IMU and lidar scan
