@@ -28,6 +28,22 @@ mapping:
                 0, 1, 0,
                 0, 0, 1]
 
+# ── IMU initialization ─────────────────────────────────────────────────
+# Optional motion-gated IMU init. When enabled, IMUInit rejects samples
+# that look non-static so gravity/bias averages are not contaminated by
+# motion. When disabled (default), init behavior matches legacy Faster-LIO
+# exactly (MAX_INI_COUNT=20 samples, unconditional averaging).
+#
+# The accel gate is *relative* to the running ‖mean_acc‖, so the same
+# threshold works whether the sensor reports accel in m/s² or g.
+# `gyr_thresh` is always rad/s.
+imu_init:
+  motion_gate_enabled: false   # set true to harden init (see below)
+  acc_rel_thresh: 0.05         # |‖cur_acc‖ − ‖mean_acc‖| / ‖mean_acc‖
+  gyr_thresh: 0.05             # rad/s max ‖cur_gyr‖
+  min_accepted: 50             # samples that pass the gate before init completes
+  max_tries: 1000              # ~5 s fail-soft cap at 200 Hz IMU
+
 # ── Map and matching ───────────────────────────────────────────────────
 point_filter_num: 1            # keep every Nth point (1 = no downsampling)
 max_iteration: 3               # IEKF inner iterations per scan
