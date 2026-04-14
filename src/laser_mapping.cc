@@ -77,6 +77,16 @@ bool LaserMapping::LoadParamsFromYAML(const std::string &yaml_file) {
         b_gyr_cov = yaml["mapping"]["b_gyr_cov"].as<float>();
         b_acc_cov = yaml["mapping"]["b_acc_cov"].as<float>();
 
+        // LiDAR point-to-plane measurement covariance (optional; preserves
+        // baseline when absent). Raise when filter is overconfident
+        // (chi² ≫ 1 in diagnostics).
+        if (yaml["mapping"]["laser_point_cov"]) {
+            options::LASER_POINT_COV = yaml["mapping"]["laser_point_cov"].as<double>();
+            spdlog::info("LASER_POINT_COV overridden from yaml: {:.6f}", options::LASER_POINT_COV);
+        } else {
+            options::LASER_POINT_COV = options::DEFAULT_LASER_POINT_COV;
+        }
+
         // Preprocessing (sensor-agnostic). Only two knobs: blind distance
         // and per-point downsampling stride.
         if (yaml["preprocess"] && yaml["preprocess"]["blind"]) {
@@ -843,7 +853,14 @@ void LaserMapping::EnableDiagnostics(const std::string &csv_path) {
         << "grav_x,grav_y,grav_z,"
         << "ext_T_x,ext_T_y,ext_T_z,"
         << "t_undistort_us,t_downsample_us,t_iekf_us,t_mapinc_us,t_run_total_us,"
-        << "rss_mb,cpu_delta_us\n";
+        << "rss_mb,cpu_delta_us,"
+        // Filter's own 1-σ posterior std on pos (m), rot (rad), vel (m/s).
+        // These come from the diagonal of P after the IEKF (+ optional wheel)
+        // update. Compare to observed APE: if σ_pos ≪ APE the filter is
+        // optimistic and noise covariances are mis-tuned.
+        << "sigma_pos_x,sigma_pos_y,sigma_pos_z,"
+        << "sigma_rot_x,sigma_rot_y,sigma_rot_z,"
+        << "sigma_vel_x,sigma_vel_y,sigma_vel_z\n";
     diag_prev_cpu_us_ = 0;
     spdlog::info("Diagnostics CSV enabled: {}", csv_path);
 #else
@@ -905,6 +922,21 @@ void LaserMapping::WriteDiagnosticsRow() {
     const int64_t cpu_delta_us = diag_prev_cpu_us_ ? (cpu_us - diag_prev_cpu_us_) : 0;
     diag_prev_cpu_us_ = cpu_us;
 
+    // Posterior 1-σ from P diagonal. State tangent layout (23): pos 0..2,
+    // rot 3..5, offset_R 6..8, offset_T 9..11, vel 12..14, bg 15..17,
+    // ba 18..20, grav 21..22. Clamp tiny negatives to 0 before sqrt.
+    auto safe_sqrt = [](double x) { return x > 0.0 ? std::sqrt(x) : 0.0; };
+    const auto &P = kf_.get_P();
+    const double sigma_pos_x = safe_sqrt(P(0, 0));
+    const double sigma_pos_y = safe_sqrt(P(1, 1));
+    const double sigma_pos_z = safe_sqrt(P(2, 2));
+    const double sigma_rot_x = safe_sqrt(P(3, 3));
+    const double sigma_rot_y = safe_sqrt(P(4, 4));
+    const double sigma_rot_z = safe_sqrt(P(5, 5));
+    const double sigma_vel_x = safe_sqrt(P(12, 12));
+    const double sigma_vel_y = safe_sqrt(P(13, 13));
+    const double sigma_vel_z = safe_sqrt(P(14, 14));
+
     (*diag_csv_) << std::fixed << std::setprecision(9)
         << frame_num_ << "," << lidar_end_time_ << ","
         << undist_pts << "," << cur_pts << "," << map_grids << ","
@@ -921,7 +953,10 @@ void LaserMapping::WriteDiagnosticsRow() {
         << s.offset_T_L_I(0) << "," << s.offset_T_L_I(1) << "," << s.offset_T_L_I(2) << ","
         << diag_t_undistort_us_ << "," << diag_t_downsample_us_ << ","
         << diag_t_iekf_us_ << "," << diag_t_mapinc_us_ << "," << diag_t_run_total_us_ << ","
-        << rss_mb << "," << cpu_delta_us << "\n";
+        << rss_mb << "," << cpu_delta_us << ","
+        << sigma_pos_x << "," << sigma_pos_y << "," << sigma_pos_z << ","
+        << sigma_rot_x << "," << sigma_rot_y << "," << sigma_rot_z << ","
+        << sigma_vel_x << "," << sigma_vel_y << "," << sigma_vel_z << "\n";
 }
 #endif
 
