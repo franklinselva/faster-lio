@@ -13,7 +13,9 @@
 namespace faster_lio::compat {
 using std::execution::par_unseq;
 using std::execution::seq;
-inline constexpr auto unseq = std::execution::unseq;
+// libc++ as of LLVM 22 doesn't expose std::execution::unseq by name;
+// alias par_unseq via reference (the policy types have deleted copy ctors).
+inline constexpr auto& unseq = std::execution::par_unseq;
 
 template <typename Policy, typename It, typename F>
 void for_each(Policy&& policy, It first, It last, F f) {

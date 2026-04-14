@@ -11,6 +11,17 @@ option(WITH_IVOX_NODE_TYPE_PHC "Use PHC instead of default ivox node" OFF)
 option(BUILD_EXAMPLES "Build example applications" ON)
 option(BUILD_TESTS "Build unit tests" ON)
 
+# Per-frame diagnostics CSV. Off in Release builds — runtime cost is small
+# but unnecessary in production. Enable explicitly for algorithm debugging.
+if(CMAKE_BUILD_TYPE STREQUAL "Release" OR CMAKE_BUILD_TYPE STREQUAL "MinSizeRel")
+    set(_DIAG_DEFAULT OFF)
+else()
+    set(_DIAG_DEFAULT ON)
+endif()
+option(FASTER_LIO_ENABLE_DIAGNOSTICS
+       "Enable per-frame diagnostic CSV writer (overhead; debug-only)"
+       ${_DIAG_DEFAULT})
+
 # Dependencies
 include(FetchContent)
 
@@ -41,9 +52,14 @@ endif()
 # TBB: required for iVox data structure, also enables C++17 parallel execution on Linux/GCC
 find_package(TBB REQUIRED)
 
-# Detect C++17 parallel execution support (requires <execution> header + TBB backend on GCC)
+# Detect C++17 parallel execution support.
+#   - GCC libstdc++: works out of the box with -ltbb
+#   - LLVM libc++ (since 17): needs -fexperimental-library to enable parallel STL
+#   - Apple Clang: no <execution> support, falls back to sequential
 include(CheckCXXSourceCompiles)
 set(CMAKE_REQUIRED_LIBRARIES TBB::tbb)
+
+# First try plain (works for GCC/libstdc++)
 set(CMAKE_REQUIRED_FLAGS "-std=c++17")
 check_cxx_source_compiles("
     #include <execution>
@@ -54,12 +70,38 @@ check_cxx_source_compiles("
         std::for_each(std::execution::par_unseq, v.begin(), v.end(), [](int&){});
         return 0;
     }
-" HAS_STD_EXECUTION)
+" HAS_STD_EXECUTION_PLAIN)
+
+set(_PAR_EXTRA_FLAGS "")
+if(HAS_STD_EXECUTION_PLAIN)
+    set(HAS_STD_EXECUTION TRUE)
+else()
+    # Retry with libc++ experimental library flag
+    set(CMAKE_REQUIRED_FLAGS "-std=c++17 -fexperimental-library")
+    check_cxx_source_compiles("
+        #include <execution>
+        #include <algorithm>
+        #include <vector>
+        int main() {
+            std::vector<int> v{1,2,3};
+            std::for_each(std::execution::par_unseq, v.begin(), v.end(), [](int&){});
+            return 0;
+        }
+    " HAS_STD_EXECUTION_EXPERIMENTAL)
+    if(HAS_STD_EXECUTION_EXPERIMENTAL)
+        set(HAS_STD_EXECUTION TRUE)
+        set(_PAR_EXTRA_FLAGS "-fexperimental-library")
+    endif()
+endif()
 unset(CMAKE_REQUIRED_LIBRARIES)
 unset(CMAKE_REQUIRED_FLAGS)
 
 if(HAS_STD_EXECUTION)
-    message(STATUS "C++17 parallel execution policies: ENABLED (via TBB)")
+    if(_PAR_EXTRA_FLAGS)
+        message(STATUS "C++17 parallel execution policies: ENABLED (libc++ experimental, ${_PAR_EXTRA_FLAGS})")
+    else()
+        message(STATUS "C++17 parallel execution policies: ENABLED (libstdc++ + TBB)")
+    endif()
 else()
     message(STATUS "C++17 parallel execution policies: DISABLED (sequential fallback)")
 endif()
@@ -86,6 +128,8 @@ target_include_directories(${PROJECT_NAME} PUBLIC
 target_include_directories(${PROJECT_NAME} SYSTEM PUBLIC
     ${EIGEN3_INCLUDE_DIR}
     ${PCL_INCLUDE_DIRS}
+    # Rigtorp SPSCQueue — header-only, MIT-licensed, vendored under thirdparty/
+    ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty
 )
 
 target_link_libraries(${PROJECT_NAME} PUBLIC
@@ -101,6 +145,17 @@ target_compile_definitions(${PROJECT_NAME} PUBLIC
 
 if(HAS_STD_EXECUTION)
     target_compile_definitions(${PROJECT_NAME} PUBLIC FASTER_LIO_HAS_STD_EXECUTION)
+    if(_PAR_EXTRA_FLAGS)
+        target_compile_options(${PROJECT_NAME} PUBLIC ${_PAR_EXTRA_FLAGS})
+        target_link_options(${PROJECT_NAME} PUBLIC ${_PAR_EXTRA_FLAGS})
+    endif()
+endif()
+
+if(FASTER_LIO_ENABLE_DIAGNOSTICS)
+    target_compile_definitions(${PROJECT_NAME} PUBLIC FASTER_LIO_ENABLE_DIAGNOSTICS)
+    message(STATUS "Diagnostics CSV writer: ENABLED")
+else()
+    message(STATUS "Diagnostics CSV writer: DISABLED (Release build or explicitly off)")
 endif()
 
 if(WITH_IVOX_NODE_TYPE_PHC)

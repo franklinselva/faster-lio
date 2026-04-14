@@ -1,5 +1,8 @@
 #include "faster_lio/imu_processing.h"
 
+#include <tbb/parallel_for.h>
+#include <algorithm>
+
 namespace faster_lio {
 
 bool time_list(const PointType &x, const PointType &y) { return (x.curvature < y.curvature); }
@@ -176,41 +179,79 @@ void ImuProcess::UndistortPcl(const common::MeasureGroup &meas, esekfom::esekf<s
     last_imu_ = meas.imu_.back();
     last_lidar_end_time_ = pcl_end_time;
 
-    /*** undistort each lidar point (backward propagation) ***/
+    /*** undistort each lidar point (backward propagation, parallel) ***/
     if (pcl_out.points.empty()) {
         return;
     }
-    auto it_pcl = pcl_out.points.end() - 1;
-    for (auto it_kp = IMUpose_.end() - 1; it_kp != IMUpose_.begin(); it_kp--) {
-        auto head = it_kp - 1;
-        auto tail = it_kp;
-        R_imu = common::MatFromArray<double>(head->rot);
-        vel_imu = common::VecFromArray<double>(head->vel);
-        pos_imu = common::VecFromArray<double>(head->pos);
-        acc_imu = common::VecFromArray<double>(tail->acc);
-        angvel_avr = common::VecFromArray<double>(tail->gyr);
 
-        for (; it_pcl->curvature / double(1000) > head->offset_time; it_pcl--) {
-            dt = it_pcl->curvature / double(1000) - head->offset_time;
-
-            common::M3D R_i(R_imu * Exp(angvel_avr, dt));
-
-            common::V3D P_i(it_pcl->x, it_pcl->y, it_pcl->z);
-            common::V3D T_ei(pos_imu + vel_imu * dt + 0.5 * acc_imu * dt * dt - imu_state.pos);
-            common::V3D p_compensate =
-                imu_state.offset_R_L_I.conjugate() *
-                (imu_state.rot.conjugate() * (R_i * (imu_state.offset_R_L_I * P_i + imu_state.offset_T_L_I) + T_ei) -
-                 imu_state.offset_T_L_I);
-
-            it_pcl->x = p_compensate(0);
-            it_pcl->y = p_compensate(1);
-            it_pcl->z = p_compensate(2);
-
-            if (it_pcl == pcl_out.points.begin()) {
-                break;
-            }
-        }
+    // Pre-extract IMUpose_ data into flat arrays so the parallel loop reads
+    // hot, sequential memory and avoids repeated MatFromArray/VecFromArray
+    // calls inside the inner kernel.
+    const int n_poses = static_cast<int>(IMUpose_.size());
+    std::vector<double>      pose_offset_t(n_poses);
+    std::vector<common::M3D> pose_R(n_poses);
+    std::vector<common::V3D> pose_v(n_poses);
+    std::vector<common::V3D> pose_p(n_poses);
+    std::vector<common::V3D> pose_acc(n_poses);
+    std::vector<common::V3D> pose_gyr(n_poses);
+    for (int i = 0; i < n_poses; ++i) {
+        const auto &p = IMUpose_[i];
+        pose_offset_t[i] = p.offset_time;
+        pose_R[i]        = common::MatFromArray<double>(p.rot);
+        pose_v[i]        = common::VecFromArray<double>(p.vel);
+        pose_p[i]        = common::VecFromArray<double>(p.pos);
+        pose_acc[i]      = common::VecFromArray<double>(p.acc);
+        pose_gyr[i]      = common::VecFromArray<double>(p.gyr);
     }
+
+    // Capture extrinsics and end-of-scan state before the parallel region.
+    const auto offset_R_L_I_inv = imu_state.offset_R_L_I.conjugate();
+    const auto rot_inv          = imu_state.rot.conjugate();
+    const common::V3D offset_T_L_I_v = imu_state.offset_T_L_I;
+    const common::V3D pos_end        = imu_state.pos;
+    const double pose_t_min          = pose_offset_t.front();
+
+    const int n_pts = static_cast<int>(pcl_out.points.size());
+    auto *points = pcl_out.points.data();
+
+    tbb::parallel_for(tbb::blocked_range<int>(0, n_pts),
+        [&](const tbb::blocked_range<int> &r) {
+            for (int i = r.begin(); i != r.end(); ++i) {
+                auto &pt = points[i];
+                const double t_pt = pt.curvature / 1000.0;
+
+                // Match original strict-> behavior: skip points at/before the
+                // earliest IMU pose boundary (they have no preceding interval).
+                if (t_pt <= pose_t_min) continue;
+
+                // Binary search for the IMU interval that covers t_pt:
+                //   pose_offset_t[idx]  <  t_pt  <=  pose_offset_t[idx+1]
+                auto it = std::upper_bound(pose_offset_t.begin(),
+                                           pose_offset_t.end(), t_pt);
+                int idx = static_cast<int>(std::distance(pose_offset_t.begin(), it)) - 1;
+                if (idx < 0 || idx >= n_poses - 1) continue;
+
+                const double dt = t_pt - pose_offset_t[idx];
+                const auto &R_imu_     = pose_R[idx];
+                const auto &vel_imu_   = pose_v[idx];
+                const auto &pos_imu_   = pose_p[idx];
+                const auto &acc_imu_   = pose_acc[idx + 1];
+                const auto &angvel_avr_ = pose_gyr[idx + 1];
+
+                const common::M3D R_i(R_imu_ * Exp(angvel_avr_, dt));
+                const common::V3D P_i(pt.x, pt.y, pt.z);
+                const common::V3D T_ei(pos_imu_ + vel_imu_ * dt
+                                       + 0.5 * acc_imu_ * dt * dt - pos_end);
+                const common::V3D p_compensate =
+                    offset_R_L_I_inv *
+                    (rot_inv * (R_i * (imu_state.offset_R_L_I * P_i + offset_T_L_I_v) + T_ei) -
+                     offset_T_L_I_v);
+
+                pt.x = p_compensate(0);
+                pt.y = p_compensate(1);
+                pt.z = p_compensate(2);
+            }
+        });
 }
 
 void ImuProcess::Process(const common::MeasureGroup &meas, esekfom::esekf<state_ikfom, 12, input_ikfom> &kf_state,

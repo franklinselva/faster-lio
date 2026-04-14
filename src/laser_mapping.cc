@@ -1,11 +1,16 @@
 #include <pcl/io/pcd_io.h>
 #include <yaml-cpp/yaml.h>
+#include <chrono>
 #include <fstream>
 #include <iomanip>
 #include "faster_lio/compat.h"
 
 #include "faster_lio/laser_mapping.h"
 #include "faster_lio/utils.h"
+
+#ifdef FASTER_LIO_ENABLE_DIAGNOSTICS
+#include <sys/resource.h>
+#endif
 
 namespace faster_lio {
 
@@ -134,38 +139,39 @@ void LaserMapping::AddIMU(const IMUData &imu) {
 
     double timestamp = msg->timestamp;
 
-    {
-        std::lock_guard<std::mutex> lock(mtx_buffer_);
-        if (timestamp < last_timestamp_imu_) {
-            spdlog::warn("IMU timestamp went backwards (ts={}), clearing IMU buffer", timestamp);
-            imu_buffer_.clear();
-        }
+    if (timestamp < last_timestamp_imu_) {
+        spdlog::warn("IMU timestamp went backwards (ts={}), dropping sample", timestamp);
+        return;
+    }
+    last_timestamp_imu_ = timestamp;
 
-        last_timestamp_imu_ = timestamp;
-        imu_buffer_.emplace_back(msg);
+    // Lock-free push. If the consumer is stalled and the queue is full,
+    // the sample is dropped — visibility into backpressure.
+    if (!imu_queue_.try_push(msg)) {
+        spdlog::warn("IMU queue full (cap={}), dropping sample", kImuQueueCapacity);
     }
 }
 
 void LaserMapping::AddPointCloud(const PointCloudType::Ptr &cloud, double timestamp) {
-    std::lock_guard<std::mutex> lock(mtx_buffer_);
     Timer::Evaluate(
         [&, this]() {
             scan_count_++;
             if (timestamp < last_timestamp_lidar_) {
-                spdlog::error("Lidar timestamp went backwards, clearing lidar buffer");
-                lidar_buffer_.clear();
+                spdlog::error("Lidar timestamp went backwards, dropping scan");
+                return;
             }
 
             last_timestamp_lidar_ = timestamp;
 
-            if (!time_sync_en_ && abs(last_timestamp_imu_ - last_timestamp_lidar_) > 10.0 && !imu_buffer_.empty() &&
-                !lidar_buffer_.empty()) {
+            if (!time_sync_en_ && std::abs(last_timestamp_imu_ - last_timestamp_lidar_) > 10.0 &&
+                last_timestamp_imu_ > 0.0 && last_timestamp_lidar_ > 0.0) {
                 spdlog::info("IMU and LiDAR not Synced, IMU time: {}, lidar header time: {}",
                              last_timestamp_imu_, last_timestamp_lidar_);
             }
 
-            if (time_sync_en_ && !timediff_set_flg_ && abs(last_timestamp_lidar_ - last_timestamp_imu_) > 1 &&
-                !imu_buffer_.empty()) {
+            if (time_sync_en_ && !timediff_set_flg_ &&
+                std::abs(last_timestamp_lidar_ - last_timestamp_imu_) > 1 &&
+                last_timestamp_imu_ > 0.0) {
                 timediff_set_flg_ = true;
                 timediff_lidar_wrt_imu_ = last_timestamp_lidar_ + 0.1 - last_timestamp_imu_;
                 spdlog::info("Self sync IMU and LiDAR, time diff is {}", timediff_lidar_wrt_imu_);
@@ -173,8 +179,9 @@ void LaserMapping::AddPointCloud(const PointCloudType::Ptr &cloud, double timest
 
             auto ptr = std::make_shared<PointCloudType>();
             preprocess_->Process(*cloud, ptr);
-            lidar_buffer_.emplace_back(ptr);
-            time_buffer_.emplace_back(timestamp);
+            if (!lidar_queue_.try_push(LidarItem{ptr, timestamp})) {
+                spdlog::warn("LiDAR queue full (cap={}), dropping scan", kLidarQueueCapacity);
+            }
         },
         "Preprocess (Generic)");
 }
@@ -215,12 +222,22 @@ void LaserMapping::Run() {
         return;
     }
 
+#ifdef FASTER_LIO_ENABLE_DIAGNOSTICS
+    using clk = std::chrono::steady_clock;
+    const auto t_run_start = clk::now();
+    auto t0 = clk::now();
+#endif
+
     /// IMU process, kf prediction, undistortion
     p_imu_->Process(measures_, kf_, scan_undistort_);
     if (scan_undistort_->empty() || (scan_undistort_ == nullptr)) {
         spdlog::warn("Empty undistorted scan, skipping frame");
         return;
     }
+
+#ifdef FASTER_LIO_ENABLE_DIAGNOSTICS
+    diag_t_undistort_us_ = std::chrono::duration_cast<std::chrono::microseconds>(clk::now() - t0).count();
+#endif
 
     /// the first scan
     if (flg_first_scan_) {
@@ -237,12 +254,18 @@ void LaserMapping::Run() {
     flg_EKF_inited_ = (measures_.lidar_bag_time_ - first_lidar_time_) >= options::INIT_TIME;
 
     /// downsample
+#ifdef FASTER_LIO_ENABLE_DIAGNOSTICS
+    t0 = clk::now();
+#endif
     Timer::Evaluate(
         [&, this]() {
             voxel_scan_.setInputCloud(scan_undistort_);
             voxel_scan_.filter(*scan_down_body_);
         },
         "Downsample PointCloud");
+#ifdef FASTER_LIO_ENABLE_DIAGNOSTICS
+    diag_t_downsample_us_ = std::chrono::duration_cast<std::chrono::microseconds>(clk::now() - t0).count();
+#endif
 
     int cur_pts = scan_down_body_->size();
     if (cur_pts < 5) {
@@ -258,6 +281,9 @@ void LaserMapping::Run() {
     plane_coef_.resize(cur_pts, common::V4F::Zero());
 
     // ICP and iterated Kalman filter update
+#ifdef FASTER_LIO_ENABLE_DIAGNOSTICS
+    t0 = clk::now();
+#endif
     Timer::Evaluate(
         [&, this]() {
             double solve_H_time = 0;
@@ -267,9 +293,17 @@ void LaserMapping::Run() {
             pos_lidar_ = state_point_.pos + state_point_.rot * state_point_.offset_T_L_I;
         },
         "IEKF Solve and Update");
+#ifdef FASTER_LIO_ENABLE_DIAGNOSTICS
+    diag_t_iekf_us_ = std::chrono::duration_cast<std::chrono::microseconds>(clk::now() - t0).count();
+    t0 = clk::now();
+#endif
 
     // update local map
     Timer::Evaluate([&, this]() { MapIncremental(); }, "    Incremental Mapping");
+#ifdef FASTER_LIO_ENABLE_DIAGNOSTICS
+    diag_t_mapinc_us_ = std::chrono::duration_cast<std::chrono::microseconds>(clk::now() - t0).count();
+    diag_t_run_total_us_ = std::chrono::duration_cast<std::chrono::microseconds>(clk::now() - t_run_start).count();
+#endif
 
     spdlog::debug("Mapping frame {}: input={} downsampled={} map_grids={} effective_features={}",
                   frame_num_, scan_undistort_->points.size(), cur_pts, ivox_->NumValidGrids(), effect_feat_num_);
@@ -289,12 +323,27 @@ void LaserMapping::Run() {
         SaveFrameWorld();
     }
 
+#ifdef FASTER_LIO_ENABLE_DIAGNOSTICS
+    WriteDiagnosticsRow();
+#endif
+
     // Debug variables
     frame_num_++;
 }
 
 bool LaserMapping::SyncPackages() {
-    std::lock_guard<std::mutex> lock(mtx_buffer_);
+    // Drain SPSC queues into consumer-side scratch deques. The SPSC queues
+    // are lock-free; only this thread (the Run() caller) reads from them.
+    while (auto *imu = imu_queue_.front()) {
+        imu_buffer_.push_back(*imu);
+        imu_queue_.pop();
+    }
+    while (auto *item = lidar_queue_.front()) {
+        lidar_buffer_.push_back(item->cloud);
+        time_buffer_.push_back(item->timestamp);
+        lidar_queue_.pop();
+    }
+
     if (lidar_buffer_.empty() || imu_buffer_.empty()) {
         return false;
     }
@@ -704,6 +753,122 @@ void LaserMapping::Finish() {
         pcd_writer.writeBinary(all_points_dir, *pcl_wait_save_);
     }
 
+#ifdef FASTER_LIO_ENABLE_DIAGNOSTICS
+    if (diag_csv_ && diag_csv_->is_open()) {
+        diag_csv_->flush();
+        diag_csv_->close();
+    }
+#endif
+
     spdlog::info("Mapping finished, processed {} frames", frame_num_);
 }
+
+void LaserMapping::EnableDiagnostics(const std::string &csv_path) {
+#ifdef FASTER_LIO_ENABLE_DIAGNOSTICS
+    if (csv_path.empty()) {
+        diag_csv_.reset();
+        return;
+    }
+    diag_csv_ = std::make_unique<std::ofstream>(csv_path);
+    if (!diag_csv_->is_open()) {
+        spdlog::error("Failed to open diagnostics CSV: {}", csv_path);
+        diag_csv_.reset();
+        return;
+    }
+    // Header — keep columns stable so downstream plotters can rely on them.
+    (*diag_csv_)
+        << "frame,timestamp,"
+        << "scan_undistort_pts,scan_down_pts,map_grids,effect_feat,effect_ratio,"
+        << "residual_mean,residual_rms,residual_max,"
+        << "fit_quality_mean,fit_quality_rms,"
+        << "curv_min_ms,curv_max_ms,"
+        << "pos_x,pos_y,pos_z,"
+        << "vel_x,vel_y,vel_z,"
+        << "quat_w,quat_x,quat_y,quat_z,"
+        << "bg_x,bg_y,bg_z,ba_x,ba_y,ba_z,"
+        << "grav_x,grav_y,grav_z,"
+        << "ext_T_x,ext_T_y,ext_T_z,"
+        << "t_undistort_us,t_downsample_us,t_iekf_us,t_mapinc_us,t_run_total_us,"
+        << "rss_mb,cpu_delta_us\n";
+    diag_prev_cpu_us_ = 0;
+    spdlog::info("Diagnostics CSV enabled: {}", csv_path);
+#else
+    (void)csv_path;
+    spdlog::warn("EnableDiagnostics called but FASTER_LIO_ENABLE_DIAGNOSTICS is OFF");
+#endif
+}
+
+#ifdef FASTER_LIO_ENABLE_DIAGNOSTICS
+void LaserMapping::WriteDiagnosticsRow() {
+    if (!diag_csv_ || !diag_csv_->is_open()) return;
+
+    const int cur_pts = scan_down_body_ ? static_cast<int>(scan_down_body_->size()) : 0;
+    const int undist_pts = scan_undistort_ ? static_cast<int>(scan_undistort_->size()) : 0;
+    const int map_grids = ivox_ ? static_cast<int>(ivox_->NumValidGrids()) : 0;
+
+    // Residual stats over selected features only
+    double res_sum = 0, res_sum_sq = 0, res_max = 0;
+    double fq_sum = 0, fq_sum_sq = 0;
+    int res_n = 0;
+    for (int i = 0; i < cur_pts; ++i) {
+        if (!point_selected_surf_[i]) continue;
+        const double r = std::fabs(residuals_[i]);
+        res_sum += r;
+        res_sum_sq += r * r;
+        if (r > res_max) res_max = r;
+        fq_sum += fit_quality_[i];
+        fq_sum_sq += fit_quality_[i] * fit_quality_[i];
+        ++res_n;
+    }
+    const double res_mean = res_n ? res_sum / res_n : 0.0;
+    const double res_rms = res_n ? std::sqrt(res_sum_sq / res_n) : 0.0;
+    const double fq_mean = res_n ? fq_sum / res_n : 0.0;
+    const double fq_rms = res_n ? std::sqrt(fq_sum_sq / res_n) : 0.0;
+
+    // Curvature span (per-point timing sanity check)
+    float curv_min = 0, curv_max = 0;
+    if (scan_undistort_ && !scan_undistort_->empty()) {
+        curv_min = scan_undistort_->points.front().curvature;
+        curv_max = scan_undistort_->points.back().curvature;
+    }
+
+    const auto &s = state_point_;
+    const double effect_ratio = cur_pts ? double(effect_feat_num_) / cur_pts : 0.0;
+
+    // Resource usage: RSS in MB, CPU time delta in microseconds since last row.
+    rusage ru{};
+    getrusage(RUSAGE_SELF, &ru);
+#ifdef __APPLE__
+    // macOS reports ru_maxrss in BYTES
+    const double rss_mb = ru.ru_maxrss / (1024.0 * 1024.0);
+#else
+    // Linux reports ru_maxrss in KB
+    const double rss_mb = ru.ru_maxrss / 1024.0;
+#endif
+    const int64_t cpu_us =
+        static_cast<int64_t>(ru.ru_utime.tv_sec + ru.ru_stime.tv_sec) * 1000000 +
+        static_cast<int64_t>(ru.ru_utime.tv_usec + ru.ru_stime.tv_usec);
+    const int64_t cpu_delta_us = diag_prev_cpu_us_ ? (cpu_us - diag_prev_cpu_us_) : 0;
+    diag_prev_cpu_us_ = cpu_us;
+
+    (*diag_csv_) << std::fixed << std::setprecision(9)
+        << frame_num_ << "," << lidar_end_time_ << ","
+        << undist_pts << "," << cur_pts << "," << map_grids << ","
+        << effect_feat_num_ << "," << effect_ratio << ","
+        << res_mean << "," << res_rms << "," << res_max << ","
+        << fq_mean << "," << fq_rms << ","
+        << curv_min << "," << curv_max << ","
+        << s.pos(0) << "," << s.pos(1) << "," << s.pos(2) << ","
+        << s.vel(0) << "," << s.vel(1) << "," << s.vel(2) << ","
+        << s.rot.w() << "," << s.rot.x() << "," << s.rot.y() << "," << s.rot.z() << ","
+        << s.bg(0) << "," << s.bg(1) << "," << s.bg(2) << ","
+        << s.ba(0) << "," << s.ba(1) << "," << s.ba(2) << ","
+        << s.grav[0] << "," << s.grav[1] << "," << s.grav[2] << ","
+        << s.offset_T_L_I(0) << "," << s.offset_T_L_I(1) << "," << s.offset_T_L_I(2) << ","
+        << diag_t_undistort_us_ << "," << diag_t_downsample_us_ << ","
+        << diag_t_iekf_us_ << "," << diag_t_mapinc_us_ << "," << diag_t_run_total_us_ << ","
+        << rss_mb << "," << cpu_delta_us << "\n";
+}
+#endif
+
 }  // namespace faster_lio

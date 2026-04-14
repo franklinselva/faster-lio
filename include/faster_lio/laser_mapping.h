@@ -4,6 +4,13 @@
 #include <pcl/filters/voxel_grid.h>
 #include <mutex>
 
+#ifdef FASTER_LIO_ENABLE_DIAGNOSTICS
+#include <fstream>
+#include <memory>
+#endif
+
+#include <rigtorp/SPSCQueue.h>
+
 #include "faster_lio/imu_processing.h"
 #include "ivox3d/ivox3d.h"
 #include "faster_lio/pointcloud_preprocess.h"
@@ -64,6 +71,15 @@ class LaserMapping {
 
     void Savetrajectory(const std::string &traj_file);
 
+    /// Enable per-frame diagnostic CSV. Call once after Init().
+    /// Writes one row per processed frame with feature counts, residual
+    /// stats, timing, bias and extrinsic estimates. Empty path disables.
+    ///
+    /// Only functional when built with -DFASTER_LIO_ENABLE_DIAGNOSTICS=ON
+    /// (default in non-Release builds). In Release it's a no-op with zero
+    /// runtime cost.
+    void EnableDiagnostics(const std::string &csv_path);
+
     void Finish();
 
    private:
@@ -113,14 +129,27 @@ class LaserMapping {
     common::VV4F plane_coef_;                         // plane coeffs
 
     /// synchronization
-    std::mutex mtx_buffer_;              // protects data buffers (input)
     mutable std::mutex mtx_state_;       // protects output state (pose, trajectory, clouds)
     bool initialized_ = false;           // set by Init(), checked by Run()
 
-    /// data buffers
-    std::deque<double> time_buffer_;
-    std::deque<PointCloudType::Ptr> lidar_buffer_;
-    std::deque<IMUData::Ptr> imu_buffer_;
+    /// Lock-free SPSC input buffers. Producer: sensor callback thread
+    /// (AddIMU / AddPointCloud). Consumer: the thread that calls Run().
+    /// Sized for worst-case lag: ~5s of IMU at 200Hz + ~10s of LiDAR at 10Hz.
+    struct LidarItem {
+        PointCloudType::Ptr cloud;
+        double timestamp;
+    };
+    static constexpr size_t kImuQueueCapacity   = 1024;
+    static constexpr size_t kLidarQueueCapacity = 128;
+    rigtorp::SPSCQueue<IMUData::Ptr>  imu_queue_{kImuQueueCapacity};
+    rigtorp::SPSCQueue<LidarItem>     lidar_queue_{kLidarQueueCapacity};
+
+    /// Consumer-side scratch deques. SyncPackages drains the SPSC queues
+    /// into these at the start of each Run() tick, then applies the
+    /// peek-without-pop sync logic against the deques (SPSC has no peek-all).
+    std::deque<IMUData::Ptr>         imu_buffer_;
+    std::deque<PointCloudType::Ptr>  lidar_buffer_;
+    std::deque<double>               time_buffer_;
 
     /// options
     int num_max_iterations_ = 4;
@@ -165,6 +194,20 @@ class LaserMapping {
     PointCloudType::Ptr pcl_wait_save_ = std::make_shared<PointCloudType>();  // debug save
     std::vector<PoseStamped> path_;
     PoseStamped msg_body_pose_;
+
+#ifdef FASTER_LIO_ENABLE_DIAGNOSTICS
+    /// Diagnostics CSV (optional, enabled via EnableDiagnostics).
+    std::unique_ptr<std::ofstream> diag_csv_;
+    void WriteDiagnosticsRow();
+    // Per-frame stage timings (microseconds) — populated inside Run()
+    int64_t diag_t_undistort_us_{0};
+    int64_t diag_t_downsample_us_{0};
+    int64_t diag_t_iekf_us_{0};
+    int64_t diag_t_mapinc_us_{0};
+    int64_t diag_t_run_total_us_{0};
+    // CPU-time accumulator for delta computation across rows
+    int64_t diag_prev_cpu_us_{0};
+#endif
 };
 
 }  // namespace faster_lio
