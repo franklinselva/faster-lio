@@ -845,6 +845,12 @@ void LaserMapping::EnableDiagnostics(const std::string &csv_path) {
         << "scan_undistort_pts,scan_down_pts,map_grids,effect_feat,effect_ratio,"
         << "residual_mean,residual_rms,residual_max,"
         << "fit_quality_mean,fit_quality_rms,"
+        // Dynamic-load proxy: among IEKF-selected features, fraction whose
+        // k-NN plane fit RMS exceeded `map_quality_threshold` and were
+        // therefore excluded from map insertion. Spikes when the scan is
+        // dominated by moving objects or surface boundaries with corrupted
+        // local geometry. 0.0 when threshold is disabled.
+        << "dynamic_rejected,dynamic_fraction,"
         << "curv_min_ms,curv_max_ms,"
         << "pos_x,pos_y,pos_z,"
         << "vel_x,vel_y,vel_z,"
@@ -877,10 +883,14 @@ void LaserMapping::WriteDiagnosticsRow() {
     const int undist_pts = scan_undistort_ ? static_cast<int>(scan_undistort_->size()) : 0;
     const int map_grids = ivox_ ? static_cast<int>(ivox_->NumValidGrids()) : 0;
 
-    // Residual stats over selected features only
+    // Residual stats over selected features only.
+    // Same loop counts dynamic-rejected points: features that the IEKF used
+    // (point_selected_surf_=1) but that exceeded `map_quality_threshold_`
+    // and were therefore excluded from MapIncremental's iVox insertion.
     double res_sum = 0, res_sum_sq = 0, res_max = 0;
     double fq_sum = 0, fq_sum_sq = 0;
     int res_n = 0;
+    int dyn_rejected = 0;
     for (int i = 0; i < cur_pts; ++i) {
         if (!point_selected_surf_[i]) continue;
         const double r = std::fabs(residuals_[i]);
@@ -890,11 +900,15 @@ void LaserMapping::WriteDiagnosticsRow() {
         fq_sum += fit_quality_[i];
         fq_sum_sq += fit_quality_[i] * fit_quality_[i];
         ++res_n;
+        if (map_quality_threshold_ > 0.0f && fit_quality_[i] > map_quality_threshold_) {
+            ++dyn_rejected;
+        }
     }
     const double res_mean = res_n ? res_sum / res_n : 0.0;
     const double res_rms = res_n ? std::sqrt(res_sum_sq / res_n) : 0.0;
     const double fq_mean = res_n ? fq_sum / res_n : 0.0;
     const double fq_rms = res_n ? std::sqrt(fq_sum_sq / res_n) : 0.0;
+    const double dyn_fraction = res_n ? double(dyn_rejected) / res_n : 0.0;
 
     // Curvature span (per-point timing sanity check)
     float curv_min = 0, curv_max = 0;
@@ -943,6 +957,7 @@ void LaserMapping::WriteDiagnosticsRow() {
         << effect_feat_num_ << "," << effect_ratio << ","
         << res_mean << "," << res_rms << "," << res_max << ","
         << fq_mean << "," << fq_rms << ","
+        << dyn_rejected << "," << dyn_fraction << ","
         << curv_min << "," << curv_max << ","
         << s.pos(0) << "," << s.pos(1) << "," << s.pos(2) << ","
         << s.vel(0) << "," << s.vel(1) << "," << s.vel(2) << ","
