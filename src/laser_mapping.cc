@@ -36,6 +36,11 @@ bool LaserMapping::Init(const std::string &config_yaml) {
         spdlog::info("Using default iVox");
     }
 
+    if (pose_graph_enabled_) {
+        pose_graph_ = std::make_unique<PoseGraph>();
+        pose_graph_->Init(pg_opts_);
+    }
+
     initialized_ = true;
     return true;
 }
@@ -141,6 +146,20 @@ bool LaserMapping::LoadParamsFromYAML(const std::string &yaml_file) {
         const int min_accepted = ii["min_accepted"] ? ii["min_accepted"].as<int>() : DEFAULT_INIT_GATE_MIN_ACCEPTED;
         const int max_tries = ii["max_tries"] ? ii["max_tries"].as<int>() : DEFAULT_INIT_GATE_MAX_TRIES;
         p_imu_->SetInitMotionGate(en, acc_rel_thresh, gyr_thresh, min_accepted, max_tries);
+    }
+
+    // Optional: pose-graph optimization backend. Off by default.
+    if (yaml["pose_graph"]) {
+        const auto &pg = yaml["pose_graph"];
+        pose_graph_enabled_            = pg["enabled"]         ? pg["enabled"].as<bool>()           : false;
+        pg_opts_.keyframe_dist_thresh  = pg["keyframe_dist"]   ? pg["keyframe_dist"].as<double>()   : 0.5;
+        pg_opts_.keyframe_angle_thresh = pg["keyframe_angle"]  ? pg["keyframe_angle"].as<double>()  : 0.175;
+        pg_opts_.optimize_every_n      = pg["optimize_every_n"]? pg["optimize_every_n"].as<int>()   : 10;
+        pg_opts_.max_iterations        = pg["max_iterations"]  ? pg["max_iterations"].as<int>()     : 20;
+        if (pose_graph_enabled_) {
+            spdlog::info("Pose graph ENABLED: keyframe_dist={:.2f} keyframe_angle={:.3f} optimize_every={}",
+                         pg_opts_.keyframe_dist_thresh, pg_opts_.keyframe_angle_thresh, pg_opts_.optimize_every_n);
+        }
     }
 
     // Optional: wheel-odometry fusion. Off by default → no path change.
@@ -362,6 +381,8 @@ void LaserMapping::Run() {
     t0 = clk::now();
 #endif
 
+    MaybeUpdatePoseGraph();
+
     // update local map
     Timer::Evaluate([&, this]() { MapIncremental(); }, "    Incremental Mapping");
 #ifdef FASTER_LIO_ENABLE_DIAGNOSTICS
@@ -377,6 +398,15 @@ void LaserMapping::Run() {
         std::lock_guard<std::mutex> lock(mtx_state_);
         SetPosestamp(msg_body_pose_);
         msg_body_pose_.timestamp = lidar_end_time_;
+        // Apply pose graph correction to the output pose (IEKF state is untouched).
+        if (pose_graph_enabled_ && pose_graph_ && pose_graph_->HasOptimized()) {
+            Eigen::Isometry3d raw = Eigen::Isometry3d::Identity();
+            raw.linear() = msg_body_pose_.pose.orientation.toRotationMatrix();
+            raw.translation() = msg_body_pose_.pose.position;
+            Eigen::Isometry3d corrected = pg_correction_ * raw;
+            msg_body_pose_.pose.position = corrected.translation();
+            msg_body_pose_.pose.orientation = Eigen::Quaterniond(corrected.rotation());
+        }
         if (path_pub_en_ || path_save_en_) {
             path_.push_back(msg_body_pose_);
         }
@@ -1068,6 +1098,39 @@ void LaserMapping::ApplyWheelObservations(double lidar_end_time) {
     // the lateral velocity with contradictory measurements.
     if (wheel_emit_nhc_v_y_ && !has_y) ApplyBodyVelScalarUpdate(1, 0.0, wheel_nhc_cov_);
     if (wheel_emit_nhc_v_z_ && !has_z) ApplyBodyVelScalarUpdate(2, 0.0, wheel_nhc_cov_);
+}
+
+// =====================================================================
+// Pose graph optimization (optional, opt-in via yaml `pose_graph.enabled`).
+// =====================================================================
+void LaserMapping::MaybeUpdatePoseGraph() {
+    if (!pose_graph_enabled_ || !pose_graph_) return;
+
+    // Build SE(3) pose from IEKF state.
+    Eigen::Isometry3d iekf_pose = Eigen::Isometry3d::Identity();
+    iekf_pose.linear() = state_point_.rot.toRotationMatrix();
+    iekf_pose.translation() = state_point_.pos;
+
+    // Apply current correction so the graph stays in the optimized frame.
+    Eigen::Isometry3d corrected = pg_correction_ * iekf_pose;
+
+    // Extract 6x6 [pos, rot] covariance from the IEKF posterior P.
+    const auto &P = kf_.get_P();
+    Eigen::Matrix<double, 6, 6> cov;
+    cov.block<3, 3>(0, 0) = P.block<3, 3>(0, 0);  // pos-pos
+    cov.block<3, 3>(0, 3) = P.block<3, 3>(0, 3);  // pos-rot
+    cov.block<3, 3>(3, 0) = P.block<3, 3>(3, 0);  // rot-pos
+    cov.block<3, 3>(3, 3) = P.block<3, 3>(3, 3);  // rot-rot
+
+    pose_graph_->TryAddKeyframe(corrected, lidar_end_time_, cov);
+
+    if (pose_graph_->ShouldOptimize()) {
+        if (pose_graph_->Optimize()) {
+            pg_correction_ = pose_graph_->GetCorrection();
+            spdlog::info("Pose graph: correction updated ({} keyframes, {:.4f}m shift)",
+                         pose_graph_->NumKeyframes(), pg_correction_.translation().norm());
+        }
+    }
 }
 
 }  // namespace faster_lio

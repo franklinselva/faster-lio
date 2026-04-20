@@ -22,6 +22,7 @@ option(FASTER_LIO_ENABLE_DIAGNOSTICS
        "Enable per-frame diagnostic CSV writer (overhead; debug-only)"
        ${_DIAG_DEFAULT})
 
+
 # Dependencies
 include(FetchContent)
 
@@ -106,6 +107,14 @@ else()
     message(STATUS "C++17 parallel execution policies: DISABLED (sequential fallback)")
 endif()
 
+# g2o: pose graph optimization backend.
+# When built via butterfli_find_faster_lio(), g2o targets already exist.
+# For standalone builds, try find_package as a fallback.
+if(NOT TARGET core)
+    find_package(g2o REQUIRED)
+endif()
+message(STATUS "Pose graph backend (g2o): ENABLED")
+
 # For ubuntu 18.04 with custom TBB path
 if(CUSTOM_TBB_DIR)
     set(TBB2018_INCLUDE_DIR "${CUSTOM_TBB_DIR}/include")
@@ -119,6 +128,7 @@ add_library(${PROJECT_NAME}
     src/imu_processing.cc
     src/options.cc
     src/utils.cc
+    src/pose_graph.cc
 )
 
 target_include_directories(${PROJECT_NAME} PUBLIC
@@ -157,6 +167,9 @@ if(FASTER_LIO_ENABLE_DIAGNOSTICS)
 else()
     message(STATUS "Diagnostics CSV writer: DISABLED (Release build or explicitly off)")
 endif()
+
+target_link_libraries(${PROJECT_NAME} PUBLIC
+    core stuff types_slam3d solver_eigen)
 
 if(WITH_IVOX_NODE_TYPE_PHC)
     message(STATUS "Using IVOX_NODE_TYPE_PHC")

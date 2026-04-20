@@ -14,6 +14,7 @@
 #include "faster_lio/imu_processing.h"
 #include "ivox3d/ivox3d.h"
 #include "faster_lio/pointcloud_preprocess.h"
+#include "faster_lio/pose_graph.h"
 #include "faster_lio/wheel_fusion.h"
 
 namespace faster_lio {
@@ -226,6 +227,13 @@ class LaserMapping {
     PointCloudType::Ptr pcl_wait_save_ = std::make_shared<PointCloudType>();  // debug save
     std::vector<PoseStamped> path_;
     PoseStamped msg_body_pose_;
+
+    /// Pose graph optimization (optional, gated by yaml `pose_graph.enabled`).
+    bool   pose_graph_enabled_ = false;
+    std::unique_ptr<PoseGraph> pose_graph_;
+    PoseGraph::Options pg_opts_;
+    Eigen::Isometry3d pg_correction_ = Eigen::Isometry3d::Identity();
+    void MaybeUpdatePoseGraph();
 
 #ifdef FASTER_LIO_ENABLE_DIAGNOSTICS
     /// Diagnostics CSV (optional, enabled via EnableDiagnostics).
