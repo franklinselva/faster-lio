@@ -60,6 +60,11 @@ class LaserMapping {
     Odometry GetCurrentOdometry() const;
     std::vector<PoseStamped> GetTrajectory() const;
 
+    /// Access to the embedded pose graph for external consumers (loop-closure
+    /// detectors, map deformers). Returns nullptr if the pose graph is disabled.
+    PoseGraph *GetPoseGraph() { return pose_graph_.get(); }
+    const PoseGraph *GetPoseGraph() const { return pose_graph_.get(); }
+
     /// Get a copy of the latest undistorted scan (body frame).
     CloudPtr GetUndistortedCloud() const;
 
