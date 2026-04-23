@@ -120,10 +120,13 @@ void ImuProcess::IMUInit(const common::MeasureGroup &meas, esekfom::esekf<state_
     }
     state_ikfom init_state = kf_state.get_x();
     if (init_assume_level_) {
-        // Standard Z-up mount: trust the rig is roughly level at startup and
-        // use the canonical gravity direction. Avoids inheriting any residual
-        // XY component of mean_acc_ (from noise or gentle motion during init)
-        // as a permanent world-frame skew.
+        // Proper leveling init: keep world gravity along -Z (canonical world
+        // frame). The complementary rotation piece (init_state.rot) is
+        // applied ONCE at init-completion, not here — setting rot on every
+        // IMUInit() tick (while the running mean_acc is still evolving and
+        // the filter is propagating with gyro) caused the filter to diverge
+        // catastrophically on real bags. See Process()'s `complete` block
+        // for the single-shot assignment.
         init_state.grav = S2(0.0, 0.0, -common::G_m_s2);
     } else {
         init_state.grav = S2(-mean_acc_ / mean_acc_.norm() * common::G_m_s2);
@@ -341,6 +344,29 @@ void ImuProcess::Process(const common::MeasureGroup &meas, esekfom::esekf<state_
 
             cov_acc_ = cov_acc_scale_;
             cov_gyr_ = cov_gyr_scale_;
+
+            // One-shot proper leveling: apply body→world rotation from the
+            // final (gated, stable) mean_acc direction, so the first post-init
+            // prediction has the true rig tilt baked into state.rot. Must be
+            // done AFTER imu_need_init_=false so we don't reset on the next
+            // IMU tick. `grav_world = (0,0,-G)` is already set above per
+            // `init_assume_level_`.
+            if (init_assume_level_) {
+                state_ikfom post_init = kf_state.get_x();
+                const Eigen::Vector3d body_up = mean_acc_ / mean_acc_.norm();
+                const Eigen::Vector3d world_up(0.0, 0.0, 1.0);
+                const Eigen::Quaterniond q =
+                    Eigen::Quaterniond::FromTwoVectors(body_up, world_up);
+                post_init.rot = SO3(q);
+                // Reset pos/vel/ba to zero so the filter restarts cleanly
+                // in the now-level world frame. The init-phase propagation
+                // was integrating in a pre-leveled world and would leak
+                // accumulated numerical junk.
+                post_init.pos.setZero();
+                post_init.vel.setZero();
+                post_init.ba.setZero();
+                kf_state.change_x(post_init);
+            }
             if (init_gate_enabled_) {
                 if (failed_soft) {
                     spdlog::warn("IMU init FAIL-SOFT: only {} / {} required static samples after {} tries "

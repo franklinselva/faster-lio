@@ -93,6 +93,10 @@ PointCloudType::Ptr MakeRoomScan(unsigned drop_mask,
     return cloud;
 }
 
+// Helper overload: write YAML with an explicit `imu_init.assume_level` flag.
+// Used by LevelingInit tests to compare old-hack vs proper leveling paths.
+std::string WriteTestYAMLWithAssumeLevel(const std::string& tag, bool assume_level);
+
 // Minimal config that keeps a dense synthetic scan observable.
 // Voxel sizes are tighter than default.yaml (0.15 vs 0.5) because our
 // synthetic environment is 5 m × 5 m × 3 m — with 0.5 m voxels the map
@@ -137,12 +141,42 @@ pcd_save:
     return path;
 }
 
+std::string WriteTestYAMLWithAssumeLevel(const std::string& tag, bool assume_level) {
+    const std::string path = std::string(ROOT_DIR) + "config/test_lio_" + tag + ".yaml";
+    std::ofstream f(path);
+    f << "common:\n  time_sync_en: false\n"
+      << "preprocess:\n  blind: 0.1\n"
+      << "mapping:\n"
+      << "  acc_cov: 0.1\n  gyr_cov: 0.1\n"
+      << "  b_acc_cov: 0.0001\n  b_gyr_cov: 0.0001\n"
+      << "  det_range: 100.0\n"
+      << "  extrinsic_est_en: false\n"
+      << "  extrinsic_T: [0, 0, 0]\n"
+      << "  extrinsic_R: [1, 0, 0, 0, 1, 0, 0, 0, 1]\n"
+      << "imu_init:\n"
+      << "  motion_gate_enabled: false\n"
+      << "  assume_level: " << (assume_level ? "true" : "false") << "\n"
+      << "max_iteration: 4\n"
+      << "point_filter_num: 1\n"
+      << "filter_size_surf: 0.15\n"
+      << "filter_size_map: 0.15\n"
+      << "cube_side_length: 1000\n"
+      << "ivox_grid_resolution: 0.15\n"
+      << "ivox_nearby_type: 18\n"
+      << "esti_plane_threshold: 0.1\n"
+      << "map_quality_threshold: 0.0\n"
+      << "output:\n  path_en: false\n  dense_en: false\n  path_save_en: false\n"
+      << "pcd_save:\n  pcd_save_en: false\n  interval: -1\n";
+    return path;
+}
+
 struct FinalState {
     Eigen::Vector3d pos;
     Eigen::Vector3d vel;
     Eigen::Vector3d ba;
     Eigen::Vector3d bg;
     Eigen::Vector3d grav;
+    Eigen::Quaterniond rot{Eigen::Quaterniond::Identity()};
     int final_traj_len;
 };
 
@@ -194,6 +228,7 @@ FinalState SimulateStationary(LaserMapping& mapping,
     out.ba   = Eigen::Vector3d(s.ba(0),  s.ba(1),  s.ba(2));
     out.bg   = Eigen::Vector3d(s.bg(0),  s.bg(1),  s.bg(2));
     out.grav = Eigen::Vector3d(s.grav[0], s.grav[1], s.grav[2]);
+    out.rot = Eigen::Quaterniond(s.rot);
     out.final_traj_len = static_cast<int>(mapping.GetTrajectory().size());
     return out;
 }
@@ -524,4 +559,154 @@ TEST(LioDriftAttribution, ObservableBias_OnXAxis_PostInit_ConvergesToBax) {
 
     // ba_x should converge toward Δ. Diagnostic only — exact value depends
     // on filter timing/covariance. We log the ratio for inspection.
+}
+
+// ═════════════════════════════════════════════════════════════════════════
+// Leveling-init battery.
+//
+// The R3LIVE hkust_campus_00 bag init-captured a tilted rig:
+//   mean_acc = (−0.013, +0.306, +9.730) → ~1.8° roll around body-X.
+//
+// Our current `imu_init.assume_level: true` path sets:
+//   init_state.rot  = I
+//   init_state.grav = (0, 0, −G)
+// i.e. it LIES to the filter about the body's orientation (pretends it's
+// level when it isn't). The rotation state must then converge via LiDAR
+// observations before horizontal motion gets mapped correctly to world.
+//
+// The physically correct leveling init:
+//   init_state.rot  = R such that R * body_up = world_up
+//                    (carry the tilt where it belongs)
+//   init_state.grav = (0, 0, −G)
+// After this, no convergence is needed: body-frame forward walking
+// projects correctly into world-frame motion from the first step.
+//
+// Tests below are expected to FAIL on the current codebase and PASS once
+// the fix lands. They feed tilted IMU input and assert the filter knows
+// about the tilt.
+// ═════════════════════════════════════════════════════════════════════════
+
+namespace {
+
+// Simulate the R3LIVE hkust_campus_00 init capture: a 1.8° roll around
+// body-X axis. mean_acc = -g expressed in body frame:
+//   g_world = (0, 0, -G); R_bw = R_X(+1.8°); a_body = -R_bw^T * g_world
+//         = (0, G·sin(1.8°), G·cos(1.8°)) ≈ (0, +0.306, +9.805).
+constexpr double kTiltDeg = 1.8;
+
+Eigen::Vector3d TiltedStationaryAccel() {
+    const double th = kTiltDeg * M_PI / 180.0;
+    return Eigen::Vector3d(0.0, kG * std::sin(th), kG * std::cos(th));
+}
+
+// Extract roll (about X), pitch (about Y), yaw (about Z) from a quaternion.
+Eigen::Vector3d ToRollPitchYaw(const Eigen::Quaterniond& q) {
+    const Eigen::Matrix3d R = q.toRotationMatrix();
+    const double roll  = std::atan2(R(2, 1), R(2, 2));
+    const double pitch = std::asin(-R(2, 0));
+    const double yaw   = std::atan2(R(1, 0), R(0, 0));
+    return Eigen::Vector3d(roll, pitch, yaw);
+}
+
+}  // namespace
+
+// ─── Test A: `assume_level: true` with a tilted IMU.
+//
+// Current behavior (the hack): init sets rot=I, leaving the filter to
+// discover the tilt via LiDAR. In a full-room scan this eventually works
+// because wall geometry constrains rot. Expected converged state:
+//   - rot should eventually reflect the true body tilt (roll ≈ 1.8°)
+//     after 30 s of observations.
+//   - ba_body should absorb the gravity-magnitude residual (small z).
+//
+// If rot does NOT converge toward the tilt, the filter is stuck with its
+// lie and horizontal motion will leak into pos_z on real bags — exactly
+// the hkust_campus_00 symptom.
+TEST(LioDriftAttribution, LevelingInit_AssumeLevelTrue_RotShouldConvergeToTilt) {
+    const std::string yaml = WriteTestYAMLWithAssumeLevel("level_true", true);
+    LaserMapping mapping;
+    ASSERT_TRUE(mapping.Init(yaml));
+
+    auto scan = MakeRoomScan(kDropNone);
+    const auto accel = TiltedStationaryAccel();
+    const auto s = SimulateStationary(mapping, scan, accel, kSimSeconds);
+    PrintState("Tilted IMU, assume_level=true", s);
+
+    const auto rpy = ToRollPitchYaw(s.rot);
+    const double expected_roll = kTiltDeg * M_PI / 180.0;
+    std::cerr << "  roll=" << (rpy.x() * 180.0 / M_PI) << "° "
+              << " pitch=" << (rpy.y() * 180.0 / M_PI) << "° "
+              << " yaw="   << (rpy.z() * 180.0 / M_PI) << "° "
+              << " (expected roll=" << kTiltDeg << "°)\n";
+
+    std::remove(yaml.c_str());
+    // Diagnostic only: we want to see how close the converged rot gets to
+    // the true tilt. An expectation here documents the current behaviour
+    // for regression-tracking; no failure gate.
+    EXPECT_GT(std::abs(rpy.x()), 0.0) << "rot didn't move at all from identity";
+}
+
+// ─── Test B: `assume_level: false` with the same tilted IMU.
+//
+// Default path: init_state.grav = -mean_acc/||mean_acc||*G. So the world
+// frame is tilted to match the body (grav not pointing along world-Z).
+// rot is still I. The filter's world frame is tilted relative to the
+// true world — positions are in a tilted frame forever.
+TEST(LioDriftAttribution, LevelingInit_AssumeLevelFalse_WorldGravCarriesTilt) {
+    const std::string yaml = WriteTestYAMLWithAssumeLevel("level_false", false);
+    LaserMapping mapping;
+    ASSERT_TRUE(mapping.Init(yaml));
+
+    auto scan = MakeRoomScan(kDropNone);
+    const auto accel = TiltedStationaryAccel();
+    const auto s = SimulateStationary(mapping, scan, accel, kSimSeconds);
+    PrintState("Tilted IMU, assume_level=false", s);
+
+    std::remove(yaml.c_str());
+    // Document the shape: grav_world should point in the direction of
+    // -mean_acc (i.e. have a small +Y component equal to -sin(tilt)*G).
+    const double expected_gy = -kG * std::sin(kTiltDeg * M_PI / 180.0);
+    EXPECT_NEAR(s.grav.y(), expected_gy, 0.02)
+        << "grav_y should carry the init tilt when assume_level=false";
+}
+
+// ─── Test C (the headline): proper leveling init.
+//
+// What we're about to implement: init_state.rot = FromTwoVectors(body_up,
+// world_up), init_state.grav = (0, 0, -G). Body tilt lives in rot from
+// the first IMU sample; world frame is truly level from the start.
+//
+// This test gates the fix: it MUST fail before the fix, pass after.
+// We detect that by asserting rot has the right roll AT init time (not
+// after 30 s of LiDAR-driven convergence).
+TEST(LioDriftAttribution, LevelingInit_ProperLeveling_RotCarriesTiltFromInit) {
+    const std::string yaml = WriteTestYAMLWithAssumeLevel("level_proper", true);
+    LaserMapping mapping;
+    ASSERT_TRUE(mapping.Init(yaml));
+
+    // Feed only enough IMU samples + one scan to trigger the IEKF init,
+    // then inspect state.rot. Post-fix: rot should already reflect the
+    // measured tilt. Pre-fix (current code): rot stays at identity.
+    auto scan = MakeRoomScan(kDropNone);
+    const auto accel = TiltedStationaryAccel();
+    // 5 seconds is well past the 400-sample init window (2 s @ 200 Hz).
+    const auto s = SimulateStationary(mapping, scan, accel, 5.0);
+    PrintState("Tilted IMU, expected PROPER leveling", s);
+
+    const auto rpy = ToRollPitchYaw(s.rot);
+    std::cerr << "  after 5 s: roll=" << (rpy.x() * 180.0 / M_PI) << "° "
+              << "pitch=" << (rpy.y() * 180.0 / M_PI) << "° "
+              << " (expected roll≈" << kTiltDeg << "°)\n";
+
+    std::remove(yaml.c_str());
+
+    // Post-fix assertion: rot carries the tilt within 0.5° even after only
+    // 5 s (because the init itself sets it, no convergence needed). Also
+    // grav is truly (0, 0, -G): no XY bleed.
+    const double expected_roll_rad = kTiltDeg * M_PI / 180.0;
+    EXPECT_NEAR(std::abs(rpy.x()), expected_roll_rad, 0.5 * M_PI / 180.0)
+        << "Proper leveling init did not set rot from measured gravity.";
+    EXPECT_LT(std::abs(s.grav.x()), 0.05);
+    EXPECT_LT(std::abs(s.grav.y()), 0.05);
+    EXPECT_NEAR(s.grav.z(), -kG, 0.1);
 }
