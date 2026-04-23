@@ -41,6 +41,10 @@ bool LaserMapping::Init(const std::string &config_yaml) {
         pose_graph_->Init(pg_opts_);
     }
 
+    if (loop_closure_enabled_) {
+        loop_closer_ = std::make_unique<LoopCloser>(loop_closer_opts_);
+    }
+
     initialized_ = true;
     return true;
 }
@@ -146,6 +150,8 @@ bool LaserMapping::LoadParamsFromYAML(const std::string &yaml_file) {
         const int min_accepted = ii["min_accepted"] ? ii["min_accepted"].as<int>() : DEFAULT_INIT_GATE_MIN_ACCEPTED;
         const int max_tries = ii["max_tries"] ? ii["max_tries"].as<int>() : DEFAULT_INIT_GATE_MAX_TRIES;
         p_imu_->SetInitMotionGate(en, acc_rel_thresh, gyr_thresh, min_accepted, max_tries);
+        const bool assume_level = ii["assume_level"] ? ii["assume_level"].as<bool>() : false;
+        p_imu_->SetInitAssumeLevel(assume_level);
     }
 
     // Optional: pose-graph optimization backend. Off by default.
@@ -162,6 +168,33 @@ bool LaserMapping::LoadParamsFromYAML(const std::string &yaml_file) {
         }
     }
 
+    // Loop-closure detection (only takes effect when pose_graph is on too).
+    if (yaml["loop_closure"]) {
+        const auto &lc = yaml["loop_closure"];
+        loop_closure_enabled_                  = lc["enabled"]                ? lc["enabled"].as<bool>()                : false;
+        loop_closer_opts_.revisit_radius       = lc["revisit_radius"]         ? lc["revisit_radius"].as<float>()        : 5.0f;
+        loop_closer_opts_.min_age_frames       = lc["min_age_frames"]         ? lc["min_age_frames"].as<int>()          : 50;
+        loop_closer_opts_.icp_max_correspondence = lc["icp_max_correspondence"] ? lc["icp_max_correspondence"].as<float>() : 0.5f;
+        loop_closer_opts_.icp_max_iterations   = lc["icp_max_iterations"]     ? lc["icp_max_iterations"].as<int>()      : 30;
+        loop_closer_opts_.icp_fitness_threshold = lc["icp_fitness_threshold"] ? lc["icp_fitness_threshold"].as<float>() : 0.3f;
+        loop_closer_opts_.max_candidates_per_call = lc["max_candidates_per_call"] ? lc["max_candidates_per_call"].as<std::size_t>() : 4;
+        loop_closer_opts_.voxel_size           = lc["voxel_size"]             ? lc["voxel_size"].as<float>()            : 0.10f;
+        loop_closer_opts_.max_points_per_submap = lc["max_points_per_submap"] ? lc["max_points_per_submap"].as<std::size_t>() : 200000;
+        loop_closer_opts_.max_submaps          = lc["max_submaps"]            ? lc["max_submaps"].as<std::size_t>()     : 256;
+        if (loop_closure_enabled_ && !pose_graph_enabled_) {
+            spdlog::warn("Loop closure requested but pose_graph is OFF — disabling LCD. "
+                         "Set pose_graph.enabled: true to use this feature.");
+            loop_closure_enabled_ = false;
+        }
+        if (loop_closure_enabled_) {
+            spdlog::info("Loop closure ENABLED: revisit_r={:.2f}m min_age={} icp_corr={:.2f}m "
+                         "icp_iter={} fitness<{:.2f}m² max_per_call={}",
+                         loop_closer_opts_.revisit_radius, loop_closer_opts_.min_age_frames,
+                         loop_closer_opts_.icp_max_correspondence, loop_closer_opts_.icp_max_iterations,
+                         loop_closer_opts_.icp_fitness_threshold, loop_closer_opts_.max_candidates_per_call);
+        }
+    }
+
     // Optional: wheel-odometry fusion. Off by default → no path change.
     if (yaml["wheel"]) {
         const auto &w = yaml["wheel"];
@@ -170,15 +203,17 @@ bool LaserMapping::LoadParamsFromYAML(const std::string &yaml_file) {
         wheel_cov_v_y_      = w["cov_v_y"]         ? w["cov_v_y"].as<double>()         : 0.01;
         wheel_cov_v_z_      = w["cov_v_z"]         ? w["cov_v_z"].as<double>()         : 0.001;
         wheel_cov_omega_z_  = w["cov_omega_z"]     ? w["cov_omega_z"].as<double>()     : 0.01;
+        wheel_emit_nhc_v_x_ = w["emit_nhc_v_x"]    ? w["emit_nhc_v_x"].as<bool>()      : false;
         wheel_emit_nhc_v_y_ = w["emit_nhc_v_y"]    ? w["emit_nhc_v_y"].as<bool>()      : true;
         wheel_emit_nhc_v_z_ = w["emit_nhc_v_z"]    ? w["emit_nhc_v_z"].as<bool>()      : true;
         wheel_nhc_cov_      = w["nhc_cov"]         ? w["nhc_cov"].as<double>()         : 0.001;
         wheel_max_time_gap_ = w["max_time_gap"]    ? w["max_time_gap"].as<double>()    : 0.05;
         if (wheel_enabled_) {
             spdlog::info("Wheel odometry ENABLED: cov_v_x={:.4f} cov_v_y={:.4f} cov_v_z={:.5f} "
-                         "nhc_y={} nhc_z={} nhc_cov={:.5f} max_gap={:.3f}s",
+                         "nhc_x={} nhc_y={} nhc_z={} nhc_cov={:.5f} max_gap={:.3f}s",
                          wheel_cov_v_x_, wheel_cov_v_y_, wheel_cov_v_z_,
-                         wheel_emit_nhc_v_y_, wheel_emit_nhc_v_z_, wheel_nhc_cov_, wheel_max_time_gap_);
+                         wheel_emit_nhc_v_x_, wheel_emit_nhc_v_y_, wheel_emit_nhc_v_z_,
+                         wheel_nhc_cov_, wheel_max_time_gap_);
         }
     }
 
@@ -270,6 +305,11 @@ void LaserMapping::AddWheelOdom(const WheelOdomData &odom) {
 PoseStamped LaserMapping::GetCurrentPose() const {
     std::lock_guard<std::mutex> lock(mtx_state_);
     return msg_body_pose_;
+}
+
+state_ikfom LaserMapping::GetFilterState() const {
+    std::lock_guard<std::mutex> lock(mtx_state_);
+    return state_point_;
 }
 
 Odometry LaserMapping::GetCurrentOdometry() const {
@@ -1041,11 +1081,16 @@ WheelOdomData::Ptr LaserMapping::FindWheelObs(double target_time) const {
 }
 
 void LaserMapping::ApplyBodyVelScalarUpdate(int axis, double z_body, double R_obs) {
+    ApplyBodyVelScalarUpdateGated(axis, z_body, R_obs, 50.0);
+}
+
+void LaserMapping::ApplyBodyVelScalarUpdateGated(int axis, double z_body,
+                                                  double R_obs, double gate_sq) {
     // Delegate to the pure-math helper in wheel_fusion.h. Keeping the math
     // outside this class keeps it independently testable without friend access.
     state_ikfom x = kf_.get_x();
     wheel_fusion::StateCov P = kf_.get_P();
-    const auto rep = wheel_fusion::ApplyScalarBodyVelUpdate(x, P, axis, z_body, R_obs);
+    const auto rep = wheel_fusion::ApplyScalarBodyVelUpdate(x, P, axis, z_body, R_obs, gate_sq);
     if (rep.updated) {
         kf_.change_x(x);
         kf_.change_P(P);
@@ -1094,10 +1139,20 @@ void LaserMapping::ApplyWheelObservations(double lidar_end_time) {
     }
 
     // Non-holonomic virtual observations for axes NOT supplied by the
-    // wheel message. Emitting these when `has_y`/`has_z` would double-count
-    // the lateral velocity with contradictory measurements.
-    if (wheel_emit_nhc_v_y_ && !has_y) ApplyBodyVelScalarUpdate(1, 0.0, wheel_nhc_cov_);
-    if (wheel_emit_nhc_v_z_ && !has_z) ApplyBodyVelScalarUpdate(2, 0.0, wheel_nhc_cov_);
+    // wheel message. Emitting these when a matching component was observed
+    // would double-count the velocity with a contradictory measurement.
+    //
+    // `emit_nhc_v_x` is for non-standard IMU mounts where body-X is NOT
+    // the forward/free axis (e.g., X-up Xsens on the Hilti "robot" platform
+    // — body-X is vertical and v_body_x = 0 pins vertical drift). Default
+    // OFF; the obs.v_body_x is always consumed in the `has_x` branch.
+    const bool has_x = obs != nullptr;
+    // NHC pseudo-observations use an effectively-unbounded Mahalanobis gate.
+    // See ApplyBodyVelScalarUpdateGated comment for rationale.
+    constexpr double kNhcGateSq = 1e12;
+    if (wheel_emit_nhc_v_x_ && !has_x) ApplyBodyVelScalarUpdateGated(0, 0.0, wheel_nhc_cov_, kNhcGateSq);
+    if (wheel_emit_nhc_v_y_ && !has_y) ApplyBodyVelScalarUpdateGated(1, 0.0, wheel_nhc_cov_, kNhcGateSq);
+    if (wheel_emit_nhc_v_z_ && !has_z) ApplyBodyVelScalarUpdateGated(2, 0.0, wheel_nhc_cov_, kNhcGateSq);
 }
 
 // =====================================================================
@@ -1114,6 +1169,13 @@ void LaserMapping::MaybeUpdatePoseGraph() {
     // Apply current correction so the graph stays in the optimized frame.
     Eigen::Isometry3d corrected = pg_correction_ * iekf_pose;
 
+    // Loop-closer accumulation runs every tick (not gated by keyframe
+    // acceptance) so the active submap fills with all scans until the next
+    // keyframe is anchored.
+    if (loop_closer_ && scan_down_body_ && !scan_down_body_->empty()) {
+        loop_closer_->Accumulate(scan_down_body_, corrected);
+    }
+
     // Extract 6x6 [pos, rot] covariance from the IEKF posterior P.
     const auto &P = kf_.get_P();
     Eigen::Matrix<double, 6, 6> cov;
@@ -1122,13 +1184,32 @@ void LaserMapping::MaybeUpdatePoseGraph() {
     cov.block<3, 3>(3, 0) = P.block<3, 3>(3, 0);  // rot-pos
     cov.block<3, 3>(3, 3) = P.block<3, 3>(3, 3);  // rot-rot
 
-    pose_graph_->TryAddKeyframe(corrected, lidar_end_time_, cov);
+    const int kf_id = pose_graph_->TryAddKeyframe(corrected, lidar_end_time_, cov);
+
+    // On a freshly accepted keyframe, anchor a new submap and run detection.
+    // Matches found this tick are injected as loop-closure constraints; they
+    // take effect on the next Optimize() call.
+    if (kf_id >= 0 && loop_closer_) {
+        loop_closer_->AnchorKeyframe(kf_id, lidar_end_time_, corrected);
+        const auto matches = loop_closer_->DetectAtKeyframe(kf_id, corrected);
+        for (const auto &m : matches) {
+            pose_graph_->AddLoopClosure(m.from_id, m.to_id, m.relative_pose, m.information);
+            ++loop_closures_emitted_;
+        }
+    }
 
     if (pose_graph_->ShouldOptimize()) {
         if (pose_graph_->Optimize()) {
             pg_correction_ = pose_graph_->GetCorrection();
-            spdlog::info("Pose graph: correction updated ({} keyframes, {:.4f}m shift)",
-                         pose_graph_->NumKeyframes(), pg_correction_.translation().norm());
+            // Re-anchor submaps from corrected keyframes so subsequent ICP
+            // matches happen in the optimized frame.
+            if (loop_closer_) {
+                loop_closer_->ApplyCorrection(pose_graph_->GetKeyframes());
+            }
+            spdlog::info("Pose graph: correction updated ({} keyframes, {:.4f}m shift, "
+                         "{} loop closures so far)",
+                         pose_graph_->NumKeyframes(), pg_correction_.translation().norm(),
+                         loop_closures_emitted_);
         }
     }
 }

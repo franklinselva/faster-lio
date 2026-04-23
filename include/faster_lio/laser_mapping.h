@@ -13,6 +13,7 @@
 
 #include "faster_lio/imu_processing.h"
 #include "ivox3d/ivox3d.h"
+#include "faster_lio/loop_closer.h"
 #include "faster_lio/pointcloud_preprocess.h"
 #include "faster_lio/pose_graph.h"
 #include "faster_lio/wheel_fusion.h"
@@ -64,6 +65,11 @@ class LaserMapping {
     /// detectors, map deformers). Returns nullptr if the pose graph is disabled.
     PoseGraph *GetPoseGraph() { return pose_graph_.get(); }
     const PoseGraph *GetPoseGraph() const { return pose_graph_.get(); }
+
+    /// Snapshot of the full IEKF state (pos, rot, vel, biases, gravity,
+    /// extrinsic). Intended for test instrumentation — the live pipeline
+    /// should use GetCurrentPose / GetCurrentOdometry instead.
+    state_ikfom GetFilterState() const;
 
     /// Get a copy of the latest undistorted scan (body frame).
     CloudPtr GetUndistortedCloud() const;
@@ -197,6 +203,7 @@ class LaserMapping {
     double wheel_cov_v_y_          = 0.01;
     double wheel_cov_v_z_          = 0.001;
     double wheel_cov_omega_z_      = 0.01;
+    bool   wheel_emit_nhc_v_x_     = false;   // default OFF: most robots have body-X = forward
     bool   wheel_emit_nhc_v_y_     = true;
     bool   wheel_emit_nhc_v_z_     = true;
     double wheel_nhc_cov_          = 0.001;
@@ -205,7 +212,16 @@ class LaserMapping {
 
     // Accepts a body-frame scalar velocity observation on axis k∈{0,1,2}
     // and applies one Joseph-form Kalman update to kf_ (manual, manifold-aware).
+    // The non-gated form passes 50.0 (≈7σ²) to the underlying helper.
     void ApplyBodyVelScalarUpdate(int axis, double z_body, double R_obs);
+    // Variant for NHC pseudo-observations. The "observation" is exactly zero
+    // by physics (a planar robot cannot have velocity on its vertical or
+    // lateral body axis), so the Mahalanobis gate that's appropriate for
+    // noisy real wheel samples only blocks the NHC from pulling a divergent
+    // filter state back. Callers pass a very large gate_sq (or ~inf) to
+    // accept every NHC emit.
+    void ApplyBodyVelScalarUpdateGated(int axis, double z_body, double R_obs,
+                                       double gate_sq);
     // Drains wheel_queue_ → wheel_buffer_; picks the sample closest to
     // `lidar_end_time` within `wheel_max_time_gap_`; applies scalar updates
     // for all present components plus NHC virtual observations.
@@ -239,6 +255,15 @@ class LaserMapping {
     PoseGraph::Options pg_opts_;
     Eigen::Isometry3d pg_correction_ = Eigen::Isometry3d::Identity();
     void MaybeUpdatePoseGraph();
+
+    /// Loop-closure detection (optional, gated by yaml `loop_closure.enabled`).
+    /// Active iff pose_graph_enabled_ && loop_closer_ != nullptr. Hooks
+    /// fire from inside Run() (Accumulate) and MaybeUpdatePoseGraph
+    /// (AnchorKeyframe + DetectAtKeyframe + ApplyCorrection).
+    bool loop_closure_enabled_ = false;
+    std::unique_ptr<LoopCloser> loop_closer_;
+    LoopCloser::Options loop_closer_opts_;
+    int loop_closures_emitted_ = 0;
 
 #ifdef FASTER_LIO_ENABLE_DIAGNOSTICS
     /// Diagnostics CSV (optional, enabled via EnableDiagnostics).

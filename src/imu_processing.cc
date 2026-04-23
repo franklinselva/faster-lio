@@ -65,6 +65,14 @@ void ImuProcess::SetInitMotionGate(bool enabled, double acc_rel_thresh, double g
     }
 }
 
+void ImuProcess::SetInitAssumeLevel(bool enabled) {
+    init_assume_level_ = enabled;
+    if (enabled) {
+        spdlog::info("IMU init assume-level ENABLED: world-up snapped to (0, 0, +1) "
+                     "regardless of mean_acc direction at init");
+    }
+}
+
 void ImuProcess::IMUInit(const common::MeasureGroup &meas, esekfom::esekf<state_ikfom, 12, input_ikfom> &kf_state,
                          int &N) {
     common::V3D cur_acc, cur_gyr;
@@ -111,7 +119,15 @@ void ImuProcess::IMUInit(const common::MeasureGroup &meas, esekfom::esekf<state_
         N++;
     }
     state_ikfom init_state = kf_state.get_x();
-    init_state.grav = S2(-mean_acc_ / mean_acc_.norm() * common::G_m_s2);
+    if (init_assume_level_) {
+        // Standard Z-up mount: trust the rig is roughly level at startup and
+        // use the canonical gravity direction. Avoids inheriting any residual
+        // XY component of mean_acc_ (from noise or gentle motion during init)
+        // as a permanent world-frame skew.
+        init_state.grav = S2(0.0, 0.0, -common::G_m_s2);
+    } else {
+        init_state.grav = S2(-mean_acc_ / mean_acc_.norm() * common::G_m_s2);
+    }
 
     init_state.bg = mean_gyr_;
     init_state.offset_T_L_I = Lidar_T_wrt_IMU_;

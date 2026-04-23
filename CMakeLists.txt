@@ -129,6 +129,7 @@ add_library(${PROJECT_NAME}
     src/options.cc
     src/utils.cc
     src/pose_graph.cc
+    src/loop_closer.cc
 )
 
 target_include_directories(${PROJECT_NAME} PUBLIC
@@ -228,4 +229,6 @@ if(BUILD_TESTS)
     add_faster_lio_test(test_pointcloud_preprocess_edge_cases test_pointcloud_preprocess_edge_cases.cc)
     add_faster_lio_test(test_laser_mapping_edge_cases test_laser_mapping_edge_cases.cc)
     add_faster_lio_test(test_wheel_odom test_wheel_odom.cc)
+    add_faster_lio_test(test_imu_mount test_imu_mount.cc)
+    add_faster_lio_test(test_lio_drift_attribution test_lio_drift_attribution.cc)
 endif()

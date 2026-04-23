@@ -50,6 +50,15 @@ class ImuProcess {
     void SetInitMotionGate(bool enabled, double acc_rel_thresh, double gyr_thresh,
                            int min_accepted = DEFAULT_INIT_GATE_MIN_ACCEPTED,
                            int max_tries = DEFAULT_INIT_GATE_MAX_TRIES);
+
+    /// If true, initial gravity is snapped to (0, 0, -G_m_s2) regardless of
+    /// what mean_acc_ measured during init. Correct for standard Z-up IMU
+    /// mounts (Livox Avia, Ouster, most Xsens builds) where the sensor rig
+    /// at startup is roughly level — avoids inheriting a small mean_acc
+    /// tilt as a permanent world-frame skew that projects horizontal motion
+    /// onto world-Z. Leave OFF for non-standard mounts (e.g., X-up Xsens on
+    /// the Hilti 2023 robot) where the measured gravity direction is needed.
+    void SetInitAssumeLevel(bool enabled);
     void Process(const common::MeasureGroup &meas, esekfom::esekf<state_ikfom, 12, input_ikfom> &kf_state,
                  PointCloudType::Ptr pcl_un_);
 
@@ -91,6 +100,7 @@ class ImuProcess {
     int init_max_tries_ = DEFAULT_INIT_GATE_MAX_TRIES;
     int init_iter_rejected_ = 0;
     int init_iter_tried_ = 0;
+    bool init_assume_level_ = false;
 };
 
 }  // namespace faster_lio

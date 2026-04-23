@@ -23,7 +23,25 @@ using PointVector = std::vector<PointType, Eigen::aligned_allocator<PointType>>;
 
 namespace faster_lio::common {
 
-constexpr double G_m_s2 = 9.81;  // Gravity const in GuangDong/China
+// KEEP THIS AT 9.81 — even though the S2 manifold length is 9.8090 and a
+// "consistent" choice would be G_m_s2 = 9.8090, on the Hilti site2 bag
+// G_m_s2 = 9.8090 produces catastrophic divergence (Z → 42 km, path → 364 km),
+// while G_m_s2 = 9.81 produces a bounded "37 m drift" baseline.
+//
+// Why: with G_m_s2 = 9.8090 the IMU rescale-vs-gravity is internally
+// consistent and the IEKF posterior covariance contracts aggressively. At
+// motion onset (~t=42 s in site2) the filter's confidence is so high that
+// valid LiDAR observations get rejected by `p_body.norm() > 81 * pd2 * pd2`
+// in laser_mapping.cc:644 → "No effective feature points" cascade → IMU
+// integrates unchecked. With G_m_s2 = 9.81 the constant 0.001 m/s² residual
+// keeps covariance "looser" and the filter stays receptive to LiDAR pulls.
+//
+// This is a partial fix — the right repair is to make the outlier check
+// adapt to posterior covariance, not to live with a known mathematical
+// inconsistency. Tracked separately. DO NOT change to 9.8090 without an
+// end-to-end bag test (synthetic stationary tests pass at 9.8090 but
+// don't catch the motion-regime divergence).
+constexpr double G_m_s2 = 9.81;
 
 template <typename S>
 inline Eigen::Matrix<S, 3, 1> VecFromArray(const std::vector<double> &v) {

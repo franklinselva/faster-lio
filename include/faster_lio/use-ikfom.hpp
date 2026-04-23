@@ -7,6 +7,22 @@ namespace faster_lio {
 
 typedef MTK::vect<3, double> vect3;
 typedef MTK::SO3<double> SO3;
+// DO NOT make S2 length match common::G_m_s2.
+//
+// S2's `length` is the magnitude the filter holds for gravity. common::G_m_s2
+// is the magnitude the IMU preprocessor rescales every accel sample to. The
+// two together create a (G_m_s2 - S2_length) residual on v_dot every step.
+// Mathematically this is "wrong" (residual integrates) — but on the Hilti
+// site2 bag, MAKING THEM CONSISTENT (either direction: S2=9.81+G=9.81 or
+// S2=9.8090+G=9.8090) causes catastrophic divergence at motion onset
+// (~t=42 s, Z → tens of km, "No effective feature points" cascade in
+// laser_mapping.cc:644). The 0.001 m/s² inconsistency keeps the IEKF
+// posterior covariance "looser" so valid LiDAR observations survive the
+// outlier check during fast-motion onset. Probed empirically 2026-04-23.
+//
+// The right repair is in laser_mapping.cc's outlier rejection, not here.
+// Until that lands, this asymmetric (S2=9.8090, G_m_s2=9.81) state is
+// what makes the bag functional.
 typedef MTK::S2<double, 98090, 10000, 1> S2;
 typedef MTK::vect<1, double> vect1;
 typedef MTK::vect<2, double> vect2;
