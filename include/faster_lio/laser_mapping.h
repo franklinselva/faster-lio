@@ -254,6 +254,12 @@ class LaserMapping {
     std::unique_ptr<PoseGraph> pose_graph_;
     PoseGraph::Options pg_opts_;
     Eigen::Isometry3d pg_correction_ = Eigen::Isometry3d::Identity();
+    // Constant per-edge relative-measurement std for odometry edges. The
+    // IEKF's marginal covariance grows monotonically and is not a correct
+    // proxy for consecutive-keyframe relative uncertainty; a constant per
+    // edge is the standard hygiene choice in pose-graph LIO stacks.
+    double pg_odom_trans_std_ = 0.05;  // m per keyframe edge
+    double pg_odom_rot_std_   = 0.02;  // rad per keyframe edge (~1.1 deg)
     void MaybeUpdatePoseGraph();
 
     /// Loop-closure detection (optional, gated by yaml `loop_closure.enabled`).

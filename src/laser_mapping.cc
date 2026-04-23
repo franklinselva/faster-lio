@@ -162,9 +162,13 @@ bool LaserMapping::LoadParamsFromYAML(const std::string &yaml_file) {
         pg_opts_.keyframe_angle_thresh = pg["keyframe_angle"]  ? pg["keyframe_angle"].as<double>()  : 0.175;
         pg_opts_.optimize_every_n      = pg["optimize_every_n"]? pg["optimize_every_n"].as<int>()   : 10;
         pg_opts_.max_iterations        = pg["max_iterations"]  ? pg["max_iterations"].as<int>()     : 20;
+        pg_odom_trans_std_             = pg["odom_trans_std"]  ? pg["odom_trans_std"].as<double>()  : pg_odom_trans_std_;
+        pg_odom_rot_std_               = pg["odom_rot_std"]    ? pg["odom_rot_std"].as<double>()    : pg_odom_rot_std_;
         if (pose_graph_enabled_) {
-            spdlog::info("Pose graph ENABLED: keyframe_dist={:.2f} keyframe_angle={:.3f} optimize_every={}",
-                         pg_opts_.keyframe_dist_thresh, pg_opts_.keyframe_angle_thresh, pg_opts_.optimize_every_n);
+            spdlog::info("Pose graph ENABLED: keyframe_dist={:.2f} keyframe_angle={:.3f} optimize_every={} "
+                         "odom_std(t={:.3f}m, r={:.3f}rad)",
+                         pg_opts_.keyframe_dist_thresh, pg_opts_.keyframe_angle_thresh, pg_opts_.optimize_every_n,
+                         pg_odom_trans_std_, pg_odom_rot_std_);
         }
     }
 
@@ -1176,13 +1180,22 @@ void LaserMapping::MaybeUpdatePoseGraph() {
         loop_closer_->Accumulate(scan_down_body_, corrected);
     }
 
-    // Extract 6x6 [pos, rot] covariance from the IEKF posterior P.
-    const auto &P = kf_.get_P();
-    Eigen::Matrix<double, 6, 6> cov;
-    cov.block<3, 3>(0, 0) = P.block<3, 3>(0, 0);  // pos-pos
-    cov.block<3, 3>(0, 3) = P.block<3, 3>(0, 3);  // pos-rot
-    cov.block<3, 3>(3, 0) = P.block<3, 3>(3, 0);  // rot-pos
-    cov.block<3, 3>(3, 3) = P.block<3, 3>(3, 3);  // rot-rot
+    // Per-edge *relative* measurement covariance for odometry. g2o's
+    // EdgeSE3 interprets its information matrix as the inverse of the
+    // relative-measurement covariance between consecutive keyframes, not
+    // the marginal covariance of either endpoint. We used to pass the
+    // IEKF's marginal pos/rot block here, but that grows monotonically
+    // with dead reckoning and under-informs later edges — leaving the
+    // chain weakly constrained enough that any bad loop closure can
+    // bend it arbitrarily. A constant per-edge prior is the standard
+    // hygiene choice (LIO-SAM, hdl_graph_slam): keyframe spacing is
+    // bounded by pg_opts_.keyframe_dist_thresh / angle_thresh, so a
+    // single std captures the incremental uncertainty well enough.
+    Eigen::Matrix<double, 6, 6> cov = Eigen::Matrix<double, 6, 6>::Zero();
+    const double tvar = pg_odom_trans_std_ * pg_odom_trans_std_;
+    const double rvar = pg_odom_rot_std_   * pg_odom_rot_std_;
+    cov.block<3, 3>(0, 0) = Eigen::Matrix3d::Identity() * tvar;
+    cov.block<3, 3>(3, 3) = Eigen::Matrix3d::Identity() * rvar;
 
     const int kf_id = pose_graph_->TryAddKeyframe(corrected, lidar_end_time_, cov);
 

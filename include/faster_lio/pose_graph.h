@@ -69,8 +69,12 @@ class PoseGraph {
     /// True if enough keyframes have accumulated since the last optimization.
     bool ShouldOptimize() const;
 
-    /// Rigid correction that maps odometry poses → optimized poses.
-    /// Apply as: T_corrected = GetCorrection() * T_iekf
+    /// Cumulative rigid correction that maps raw odometry poses → optimized
+    /// poses. Apply as: T_corrected = GetCorrection() * T_iekf
+    ///
+    /// This is the COMPOSED product of all per-optimize deltas since Init().
+    /// Callers should replace (not compose) their stored copy each time —
+    /// composition is handled internally.
     Eigen::Isometry3d GetCorrection() const;
 
     /// All keyframes with their (possibly optimized) poses.
@@ -78,6 +82,7 @@ class PoseGraph {
 
     int NumKeyframes() const { return static_cast<int>(keyframes_.size()); }
     int NumEdges() const { return edges_count_; }
+    int NumLoopEdges() const { return loop_edges_count_; }
     bool HasOptimized() const { return has_optimized_; }
 
    private:
@@ -88,6 +93,7 @@ class PoseGraph {
     Eigen::Isometry3d correction_ = Eigen::Isometry3d::Identity();
     bool has_optimized_ = false;
     int edges_count_ = 0;
+    int loop_edges_count_ = 0;
     int keyframes_since_optimize_ = 0;
 };
 

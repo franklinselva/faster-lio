@@ -120,8 +120,18 @@ LoopCloser::DetectAtKeyframe(int kf_id, const Eigen::Isometry3d &latest_pose) {
         LoopMatch m;
         m.from_id = kf_id;
         m.to_id = cand.submap->keyframe_id;
-        m.relative_pose =
-            Eigen::Isometry3d(icp.getFinalTransformation().cast<double>());
+        // PCL's ICP returns T such that T * p_source = p_target — i.e. the
+        // transform from source-local (latest) to target-local (cand). In
+        // frame notation that's T^cand_latest. g2o's EdgeSE3 expects the
+        // measurement to be T^from_to = T_from^-1 * T_to, where we pass
+        // from=latest, to=cand. That's T^latest_cand, which is the inverse
+        // of what ICP hands us. Feeding the raw ICP output pulls the latest
+        // vertex by the full loop offset on every match; cascading over a
+        // dataset's worth of loops that's the "chain shrink" symptom.
+        // See tests/test_pose_graph.cc::LoopEdgeDirectionConventionMatters.
+        const Eigen::Isometry3d T_cand_latest(
+            icp.getFinalTransformation().cast<double>());
+        m.relative_pose = T_cand_latest.inverse();
         const double w = 1.0 / std::max(1e-3, static_cast<double>(fitness));
         m.information = Eigen::Matrix<double, 6, 6>::Identity() * w;
         out.push_back(m);

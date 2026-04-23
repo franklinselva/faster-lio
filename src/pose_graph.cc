@@ -118,8 +118,10 @@ void PoseGraph::AddLoopClosure(int from_id, int to_id,
     edge->setInformation(information);
     optimizer_->addEdge(edge);
     edges_count_++;
+    loop_edges_count_++;
 
-    spdlog::info("PoseGraph: loop closure {} -> {} added", from_id, to_id);
+    spdlog::info("PoseGraph: loop closure {} -> {} added (total loop edges: {})",
+                 from_id, to_id, loop_edges_count_);
 }
 
 bool PoseGraph::Optimize() {
@@ -147,20 +149,45 @@ bool PoseGraph::Optimize() {
         }
     }
 
-    // Correction: maps raw IEKF poses → globally consistent poses.
-    // T_corrected = correction_ * T_iekf
-    correction_ = keyframes_.back().pose * pre_opt_latest.inverse();
+    // Per-optimize delta: how much the latest vertex moved during THIS
+    // call. Compose into the cumulative correction so callers don't have
+    // to remember it themselves.
+    //
+    // Why composition matters: each Optimize() only knows the last
+    // vertex's pre-/post-optimize poses, not the raw IEKF pose that
+    // produced them. The raw-to-optimized mapping is the product of all
+    // per-optimize deltas. If the caller overwrites its stored correction
+    // with a single delta, new keyframes get inserted in a frame that
+    // disagrees with the existing chain → LM produces a new delta to
+    // reconcile → geometric blow-up (observed on hkust_campus_00: 54
+    // optimizes, correction saturating at ~150 m with zero loop edges).
+    // See tests/test_pose_graph.cc::CorrectionOverwriteCompoundsOnRotatingTrajectory.
+    const Eigen::Isometry3d delta =
+        keyframes_.back().pose * pre_opt_latest.inverse();
+    correction_ = delta * correction_;
 
     has_optimized_ = true;
     keyframes_since_optimize_ = 0;
 
-    spdlog::info("PoseGraph: converged in {} iterations, chi2={:.4f}, correction_t={:.4f}m",
-                 iters, optimizer_->chi2(), correction_.translation().norm());
+    spdlog::info("PoseGraph: converged in {} iterations, chi2={:.4f}, "
+                 "delta_t={:.4f}m cumulative_t={:.4f}m",
+                 iters, optimizer_->chi2(), delta.translation().norm(),
+                 correction_.translation().norm());
     return true;
 }
 
 bool PoseGraph::ShouldOptimize() const {
-    return keyframes_since_optimize_ >= opts_.optimize_every_n;
+    // Only optimize when there are loop-closure edges to satisfy. An
+    // odometry-only chain is already at the LM optimum (every edge built
+    // from the same vertex estimates has zero residual), so calling LM is
+    // a mathematical no-op. Numerically it's harmful: Cholesky of the
+    // ~6N×6N Hessian produces floating-point noise on the order of
+    // 1e-15 per call, and each round-trip of kf insert → compose →
+    // optimize on a rotating trajectory amplifies it geometrically.
+    // On hkust_campus_00 that's how the stored correction reached 150 m
+    // with zero real loop edges.
+    return keyframes_since_optimize_ >= opts_.optimize_every_n &&
+           loop_edges_count_ > 0;
 }
 
 Eigen::Isometry3d PoseGraph::GetCorrection() const {
