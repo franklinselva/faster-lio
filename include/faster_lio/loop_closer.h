@@ -13,6 +13,7 @@
 
 #include "faster_lio/common_lib.h"
 #include "faster_lio/pose_graph.h"
+#include "faster_lio/scan_context.h"
 
 namespace faster_lio {
 
@@ -53,6 +54,21 @@ class LoopCloser {
         float voxel_size = 0.10f;              ///< m — periodic downsample leaf
         std::size_t max_points_per_submap = 200'000;
         std::size_t max_submaps = 256;         ///< oldest submaps evicted beyond this
+
+        // ── Scan Context (global, pose-independent) ──────────────────────
+        // Used when IEKF drift is large enough that pose-proximity gating
+        // misses true revisits (typical for >10 m drift on solid-state
+        // LiDAR bags). Built on a per-keyframe aggregated cloud so a
+        // narrow-FoV scan still contributes to a near-panoramic descriptor.
+        bool  sc_enabled              = true;
+        int   sc_num_rings            = 20;
+        int   sc_num_sectors          = 60;
+        double sc_max_range           = 80.0;  ///< m — beyond → ignored
+        int   sc_aggregation_window   = 4;     ///< # of submaps to aggregate per descriptor
+        double sc_ring_key_threshold  = 0.20;  ///< L2 ring-key distance to enter full SC match
+        double sc_score_threshold     = 0.35;  ///< column-shift distance to be a candidate
+        double sc_min_overlap_ratio   = 0.30;  ///< min fraction of sectors in common (both non-empty)
+        std::size_t sc_top_k          = 3;     ///< full-SC matches per call that pass to ICP
     };
 
     explicit LoopCloser(const Options &opts);
@@ -87,10 +103,26 @@ class LoopCloser {
         int keyframe_id = -1;
         Eigen::Isometry3d anchor_pose = Eigen::Isometry3d::Identity();
         pcl::PointCloud<pcl::PointXYZI>::Ptr local_cloud;
+        // Wide-FoV cloud built from `sc_aggregation_window` submaps and
+        // stored in THIS submap's local frame. Used both to build the SC
+        // descriptor and as the source/target for ICP verification —
+        // single-submap clouds from solid-state LiDAR are too narrow for
+        // ICP to converge even when SC declares a match.
+        pcl::PointCloud<pcl::PointXYZI>::Ptr aggregated_cloud;
+        // Scan Context descriptor, built lazily on first access via
+        // EnsureDescriptor(). Invalidated when anchor_pose changes
+        // (ApplyCorrection) or the cloud is rebuilt.
+        Eigen::MatrixXd sc_desc;
+        Eigen::VectorXd sc_ring_key;
+        bool sc_ready = false;
     };
 
     void EvictIfOverCapacity();
     void VoxelDownsample(Submap &s) const;
+    /// Populate s.sc_desc / s.sc_ring_key from an aggregated window of the
+    /// last Options::sc_aggregation_window submaps ending at `s`, all
+    /// transformed into s's local frame. No-op if already ready.
+    void EnsureDescriptor(std::size_t submap_idx);
 
     Options opts_;
     std::deque<Submap> submaps_;

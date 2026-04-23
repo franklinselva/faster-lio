@@ -130,6 +130,7 @@ add_library(${PROJECT_NAME}
     src/utils.cc
     src/pose_graph.cc
     src/loop_closer.cc
+    src/scan_context.cc
 )
 
 target_include_directories(${PROJECT_NAME} PUBLIC
@@ -232,4 +233,5 @@ if(BUILD_TESTS)
     add_faster_lio_test(test_imu_mount test_imu_mount.cc)
     add_faster_lio_test(test_lio_drift_attribution test_lio_drift_attribution.cc)
     add_faster_lio_test(test_pose_graph test_pose_graph.cc)
+    add_faster_lio_test(test_scan_context test_scan_context.cc)
 endif()

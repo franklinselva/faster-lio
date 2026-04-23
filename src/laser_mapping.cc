@@ -185,6 +185,16 @@ bool LaserMapping::LoadParamsFromYAML(const std::string &yaml_file) {
         loop_closer_opts_.voxel_size           = lc["voxel_size"]             ? lc["voxel_size"].as<float>()            : 0.10f;
         loop_closer_opts_.max_points_per_submap = lc["max_points_per_submap"] ? lc["max_points_per_submap"].as<std::size_t>() : 200000;
         loop_closer_opts_.max_submaps          = lc["max_submaps"]            ? lc["max_submaps"].as<std::size_t>()     : 256;
+        // Scan Context (global, pose-independent) knobs — optional.
+        loop_closer_opts_.sc_enabled           = lc["sc_enabled"]           ? lc["sc_enabled"].as<bool>()           : loop_closer_opts_.sc_enabled;
+        loop_closer_opts_.sc_num_rings         = lc["sc_num_rings"]         ? lc["sc_num_rings"].as<int>()          : loop_closer_opts_.sc_num_rings;
+        loop_closer_opts_.sc_num_sectors       = lc["sc_num_sectors"]       ? lc["sc_num_sectors"].as<int>()        : loop_closer_opts_.sc_num_sectors;
+        loop_closer_opts_.sc_max_range         = lc["sc_max_range"]         ? lc["sc_max_range"].as<double>()       : loop_closer_opts_.sc_max_range;
+        loop_closer_opts_.sc_aggregation_window = lc["sc_aggregation_window"]? lc["sc_aggregation_window"].as<int>() : loop_closer_opts_.sc_aggregation_window;
+        loop_closer_opts_.sc_ring_key_threshold = lc["sc_ring_key_threshold"]? lc["sc_ring_key_threshold"].as<double>() : loop_closer_opts_.sc_ring_key_threshold;
+        loop_closer_opts_.sc_score_threshold   = lc["sc_score_threshold"]   ? lc["sc_score_threshold"].as<double>() : loop_closer_opts_.sc_score_threshold;
+        loop_closer_opts_.sc_min_overlap_ratio = lc["sc_min_overlap_ratio"] ? lc["sc_min_overlap_ratio"].as<double>() : loop_closer_opts_.sc_min_overlap_ratio;
+        loop_closer_opts_.sc_top_k             = lc["sc_top_k"]             ? lc["sc_top_k"].as<std::size_t>()      : loop_closer_opts_.sc_top_k;
         if (loop_closure_enabled_ && !pose_graph_enabled_) {
             spdlog::warn("Loop closure requested but pose_graph is OFF — disabling LCD. "
                          "Set pose_graph.enabled: true to use this feature.");
@@ -196,6 +206,14 @@ bool LaserMapping::LoadParamsFromYAML(const std::string &yaml_file) {
                          loop_closer_opts_.revisit_radius, loop_closer_opts_.min_age_frames,
                          loop_closer_opts_.icp_max_correspondence, loop_closer_opts_.icp_max_iterations,
                          loop_closer_opts_.icp_fitness_threshold, loop_closer_opts_.max_candidates_per_call);
+            if (loop_closer_opts_.sc_enabled) {
+                spdlog::info("  Scan Context ENABLED: rings={} sectors={} max_range={:.1f}m "
+                             "aggregate={} ring_key<{:.2f} sc_score<{:.2f} top_k={}",
+                             loop_closer_opts_.sc_num_rings, loop_closer_opts_.sc_num_sectors,
+                             loop_closer_opts_.sc_max_range, loop_closer_opts_.sc_aggregation_window,
+                             loop_closer_opts_.sc_ring_key_threshold,
+                             loop_closer_opts_.sc_score_threshold, loop_closer_opts_.sc_top_k);
+            }
         }
     }
 

@@ -95,6 +95,7 @@ class PoseGraph {
     int edges_count_ = 0;
     int loop_edges_count_ = 0;
     int keyframes_since_optimize_ = 0;
+    int loop_edges_since_optimize_ = 0;
 };
 
 }  // namespace faster_lio

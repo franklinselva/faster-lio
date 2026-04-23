@@ -119,6 +119,7 @@ void PoseGraph::AddLoopClosure(int from_id, int to_id,
     optimizer_->addEdge(edge);
     edges_count_++;
     loop_edges_count_++;
+    loop_edges_since_optimize_++;
 
     spdlog::info("PoseGraph: loop closure {} -> {} added (total loop edges: {})",
                  from_id, to_id, loop_edges_count_);
@@ -168,6 +169,7 @@ bool PoseGraph::Optimize() {
 
     has_optimized_ = true;
     keyframes_since_optimize_ = 0;
+    loop_edges_since_optimize_ = 0;
 
     spdlog::info("PoseGraph: converged in {} iterations, chi2={:.4f}, "
                  "delta_t={:.4f}m cumulative_t={:.4f}m",
@@ -177,17 +179,19 @@ bool PoseGraph::Optimize() {
 }
 
 bool PoseGraph::ShouldOptimize() const {
-    // Only optimize when there are loop-closure edges to satisfy. An
-    // odometry-only chain is already at the LM optimum (every edge built
-    // from the same vertex estimates has zero residual), so calling LM is
-    // a mathematical no-op. Numerically it's harmful: Cholesky of the
-    // ~6N×6N Hessian produces floating-point noise on the order of
-    // 1e-15 per call, and each round-trip of kf insert → compose →
-    // optimize on a rotating trajectory amplifies it geometrically.
-    // On hkust_campus_00 that's how the stored correction reached 150 m
-    // with zero real loop edges.
+    // Optimize only when a NEW loop-closure edge has been added since the
+    // last optimize. Re-running LM on an unchanged graph is a no-op in
+    // theory, but in practice each call's Cholesky of the ~6N×6N Hessian
+    // produces ~1e-15 m of numerical perturbation per vertex, and those
+    // perturbations compound over repeat calls — saturating at chain
+    // scale on rotating trajectories, or blowing to NaN when interacting
+    // with loop constraints (observed on hkust_campus_00: 1 loop edge,
+    // 48 optimize calls, correction diverged from 14 m → 10^29 m → NaN).
+    //
+    // Gating on "new loop edges added" means: optimize once per revisit
+    // we detect, then leave the graph alone until the next detection.
     return keyframes_since_optimize_ >= opts_.optimize_every_n &&
-           loop_edges_count_ > 0;
+           loop_edges_since_optimize_ > 0;
 }
 
 Eigen::Isometry3d PoseGraph::GetCorrection() const {
