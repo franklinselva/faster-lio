@@ -141,6 +141,38 @@ pcd_save:
     return path;
 }
 
+// YAML variant with an explicit outlier-gate block. `mode_str` must be
+// one of "range" / "mahalanobis" / "either". Used by the
+// `GateMode_*_HoldsStationary` tests below to verify the gate plumbing
+// end-to-end through the LaserMapping pipeline.
+std::string WriteTestYAMLWithGate(const std::string& tag, const std::string& mode_str) {
+    const std::string path = std::string(ROOT_DIR) + "config/test_lio_" + tag + ".yaml";
+    std::ofstream f(path);
+    f << "common:\n  time_sync_en: false\n"
+      << "preprocess:\n  blind: 0.1\n"
+      << "mapping:\n"
+      << "  acc_cov: 0.1\n  gyr_cov: 0.1\n"
+      << "  b_acc_cov: 0.0001\n  b_gyr_cov: 0.0001\n"
+      << "  det_range: 100.0\n"
+      << "  extrinsic_est_en: false\n"
+      << "  extrinsic_T: [0, 0, 0]\n"
+      << "  extrinsic_R: [1, 0, 0, 0, 1, 0, 0, 0, 1]\n"
+      << "  outlier_gate:\n    mode: " << mode_str << "\n"
+      << "imu_init:\n  motion_gate_enabled: false\n"
+      << "max_iteration: 4\n"
+      << "point_filter_num: 1\n"
+      << "filter_size_surf: 0.15\n"
+      << "filter_size_map: 0.15\n"
+      << "cube_side_length: 1000\n"
+      << "ivox_grid_resolution: 0.15\n"
+      << "ivox_nearby_type: 18\n"
+      << "esti_plane_threshold: 0.1\n"
+      << "map_quality_threshold: 0.0\n"
+      << "output:\n  path_en: false\n  dense_en: false\n  path_save_en: false\n"
+      << "pcd_save:\n  pcd_save_en: false\n  interval: -1\n";
+    return path;
+}
+
 std::string WriteTestYAMLWithAssumeLevel(const std::string& tag, bool assume_level) {
     const std::string path = std::string(ROOT_DIR) + "config/test_lio_" + tag + ".yaml";
     std::ofstream f(path);
@@ -709,4 +741,74 @@ TEST(LioDriftAttribution, LevelingInit_ProperLeveling_RotCarriesTiltFromInit) {
     EXPECT_LT(std::abs(s.grav.x()), 0.05);
     EXPECT_LT(std::abs(s.grav.y()), 0.05);
     EXPECT_NEAR(s.grav.z(), -kG, 0.1);
+}
+
+// ═════════════════════════════════════════════════════════════════════════
+// Outlier-gate mode battery.
+//
+// Each gate mode must produce a bounded-drift stationary run on the
+// full-room scan. The range gate is the legacy baseline (already covered
+// by `Stationary_FullRoom_HoldsZeroDrift` at the top of this file). We
+// rerun the same scenario here under each mode to confirm:
+//   - YAML `mapping.outlier_gate.mode: range` behaves identically.
+//   - YAML `mahalanobis` doesn't over-reject and collapse the filter.
+//   - YAML `either` is at least as permissive as `range`.
+//
+// Thresholds are intentionally loose (0.05 m for stationary drift) — we
+// care here about "does the gate plumbing work" rather than precise
+// numerical equivalence. A divergence under Mahalanobis would produce
+// metres of drift, easily caught.
+// ═════════════════════════════════════════════════════════════════════════
+
+TEST(LioDriftAttribution, GateMode_Range_HoldsStationary) {
+    const std::string yaml = WriteTestYAMLWithGate("gate_range", "range");
+    LaserMapping mapping;
+    ASSERT_TRUE(mapping.Init(yaml));
+
+    auto scan = MakeRoomScan(kDropNone);
+    const Eigen::Vector3d accel(0, 0, kG);
+    const auto s = SimulateStationary(mapping, scan, accel, kSimSeconds);
+    PrintState("Gate=range (explicit)", s);
+
+    EXPECT_LT(std::abs(s.pos.z()), 0.05);
+    EXPECT_LT(std::abs(s.ba.z()),  0.01);
+    std::remove(yaml.c_str());
+}
+
+TEST(LioDriftAttribution, GateMode_Mahalanobis_HoldsStationary) {
+    const std::string yaml = WriteTestYAMLWithGate("gate_mahal", "mahalanobis");
+    LaserMapping mapping;
+    ASSERT_TRUE(mapping.Init(yaml));
+
+    auto scan = MakeRoomScan(kDropNone);
+    const Eigen::Vector3d accel(0, 0, kG);
+    const auto s = SimulateStationary(mapping, scan, accel, kSimSeconds);
+    PrintState("Gate=mahalanobis", s);
+
+    // Mahalanobis can be strict when the filter is very confident — but
+    // with a fully-observable full-room scan the innovation variance
+    // stays well-calibrated and residuals fit the χ² bound comfortably.
+    EXPECT_LT(std::abs(s.pos.z()), 0.05)
+        << "Mahalanobis mode over-rejected observations, filter drifted — "
+        << "either the gate formula is wrong or the default chi² is too tight.";
+    EXPECT_LT(std::abs(s.ba.z()),  0.01);
+    std::remove(yaml.c_str());
+}
+
+TEST(LioDriftAttribution, GateMode_Either_HoldsStationary) {
+    const std::string yaml = WriteTestYAMLWithGate("gate_either", "either");
+    LaserMapping mapping;
+    ASSERT_TRUE(mapping.Init(yaml));
+
+    auto scan = MakeRoomScan(kDropNone);
+    const Eigen::Vector3d accel(0, 0, kG);
+    const auto s = SimulateStationary(mapping, scan, accel, kSimSeconds);
+    PrintState("Gate=either (hybrid)", s);
+
+    // Either is the most permissive mode — it accepts anything the range
+    // gate OR the Mahalanobis gate would accept. Should converge at least
+    // as tightly as range alone.
+    EXPECT_LT(std::abs(s.pos.z()), 0.05);
+    EXPECT_LT(std::abs(s.ba.z()),  0.01);
+    std::remove(yaml.c_str());
 }

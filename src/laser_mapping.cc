@@ -6,6 +6,7 @@
 #include "faster_lio/compat.h"
 
 #include "faster_lio/laser_mapping.h"
+#include "faster_lio/outlier_gate.h"
 #include "faster_lio/utils.h"
 
 #ifdef FASTER_LIO_ENABLE_DIAGNOSTICS
@@ -50,294 +51,152 @@ bool LaserMapping::Init(const std::string &config_yaml) {
 }
 
 bool LaserMapping::LoadParamsFromYAML(const std::string &yaml_file) {
-    int ivox_nearby_type;
-    double gyr_cov, acc_cov, b_gyr_cov, b_acc_cov;
-    double filter_size_surf_min;
-    common::V3D lidar_T_wrt_IMU;
-    common::M3D lidar_R_wrt_IMU;
+    // Any partial state from a prior failed load must not leak into this
+    // call: the object is considered half-init until ApplyConfig runs to
+    // completion and Init() flips `initialized_ = true`.
+    initialized_ = false;
 
-    YAML::Node yaml;
-    try {
-        yaml = YAML::LoadFile(yaml_file);
-    } catch (const YAML::BadFile &e) {
-        spdlog::error("Failed to open YAML config file '{}': {}", yaml_file, e.what());
+    LaserMappingConfig config;
+    if (!LoadLaserMappingConfig(yaml_file, config)) {
         return false;
     }
-    try {
-        path_pub_en_ = yaml["output"]["path_en"].as<bool>();
-        dense_pub_en_ = yaml["output"]["dense_en"].as<bool>();
-        path_save_en_ = yaml["output"]["path_save_en"].as<bool>();
-
-        num_max_iterations_ = yaml["max_iteration"].as<int>();
-        esti_plane_threshold_ = yaml["esti_plane_threshold"].as<float>();
-        if (yaml["map_quality_threshold"]) {
-            map_quality_threshold_ = yaml["map_quality_threshold"].as<float>();
-        }
-        options::NUM_MAX_ITERATIONS = num_max_iterations_;
-        options::ESTI_PLANE_THRESHOLD = esti_plane_threshold_;
-        time_sync_en_ = yaml["common"]["time_sync_en"].as<bool>();
-
-        filter_size_surf_min = yaml["filter_size_surf"].as<float>();
-        filter_size_map_min_ = yaml["filter_size_map"].as<float>();
-        cube_len_ = yaml["cube_side_length"].as<int>();
-        det_range_ = yaml["mapping"]["det_range"].as<float>();
-
-        // Process-noise densities that populate the IEKF Q_ diagonal.
-        //
-        // Preferred: `process_noise: {ng, na, nbg, nba}` — matches the
-        //   manifold names in use-ikfom.hpp and the semantics
-        //   (gyro/accel white-noise + their bias random walks).
-        // Legacy:    `mapping.{gyr_cov, acc_cov, b_gyr_cov, b_acc_cov}` —
-        //   upstream FAST-LIO names. Misleading because "cov" suggests
-        //   measurement covariance, but these ARE the process-noise
-        //   densities (live in Q_ via predict).
-        //
-        // Back-compat: both key groups work. `process_noise` wins if
-        // both are present. Missing both is an error.
-        {
-            const bool has_new = static_cast<bool>(yaml["process_noise"]);
-            const bool has_legacy = yaml["mapping"] && yaml["mapping"]["gyr_cov"];
-            if (!has_new && !has_legacy) {
-                spdlog::error("No process-noise config found: YAML must define either "
-                              "`process_noise: {{ng, na, nbg, nba}}` (preferred) or legacy "
-                              "`mapping.{{gyr_cov, acc_cov, b_gyr_cov, b_acc_cov}}`");
-                return false;
-            }
-            if (has_new && has_legacy) {
-                spdlog::warn("Both `process_noise` and legacy `mapping.*_cov` keys present; "
-                             "using `process_noise` (preferred). Remove legacy keys to silence.");
-            }
-            if (has_legacy && !has_new) {
-                spdlog::warn("Using deprecated `mapping.{{gyr,acc,b_gyr,b_acc}}_cov` YAML keys. "
-                             "Migrate to `process_noise: {{ng, na, nbg, nba}}` — these are "
-                             "process-noise densities, not measurement covariances.");
-            }
-            // Per-field fallback so a partial `process_noise` block inherits
-            // matching legacy keys (if any) rather than silently flipping
-            // fields to 0. Missing entirely → struct defaults below.
-            auto read = [&](const char *new_key, const char *legacy_key, float fallback) -> float {
-                if (has_new && yaml["process_noise"][new_key]) {
-                    return yaml["process_noise"][new_key].as<float>();
-                }
-                if (has_legacy && yaml["mapping"][legacy_key]) {
-                    return yaml["mapping"][legacy_key].as<float>();
-                }
-                return fallback;
-            };
-            gyr_cov   = read("ng",  "gyr_cov",   0.1f);
-            acc_cov   = read("na",  "acc_cov",   0.1f);
-            b_gyr_cov = read("nbg", "b_gyr_cov", 1.0e-4f);
-            b_acc_cov = read("nba", "b_acc_cov", 1.0e-4f);
-        }
-
-        // LiDAR point-to-plane measurement covariance (optional; preserves
-        // baseline when absent). Raise when filter is overconfident
-        // (chi² ≫ 1 in diagnostics).
-        if (yaml["mapping"]["laser_point_cov"]) {
-            options::LASER_POINT_COV = yaml["mapping"]["laser_point_cov"].as<double>();
-            spdlog::info("LASER_POINT_COV overridden from yaml: {:.6f}", options::LASER_POINT_COV);
-        } else {
-            options::LASER_POINT_COV = options::DEFAULT_LASER_POINT_COV;
-        }
-
-        // Preprocessing (sensor-agnostic). Only two knobs: blind distance
-        // and per-point downsampling stride.
-        if (yaml["preprocess"] && yaml["preprocess"]["blind"]) {
-            preprocess_->SetBlind(yaml["preprocess"]["blind"].as<double>());
-        }
-        preprocess_->SetPointFilterNum(yaml["point_filter_num"].as<int>());
-
-        extrinsic_est_en_ = yaml["mapping"]["extrinsic_est_en"].as<bool>();
-        pcd_save_en_ = yaml["pcd_save"]["pcd_save_en"].as<bool>();
-        pcd_save_interval_ = yaml["pcd_save"]["interval"].as<int>();
-        extrinT_ = yaml["mapping"]["extrinsic_T"].as<std::vector<double>>();
-        extrinR_ = yaml["mapping"]["extrinsic_R"].as<std::vector<double>>();
-
-        ivox_options_.resolution_ = yaml["ivox_grid_resolution"].as<float>();
-        ivox_nearby_type = yaml["ivox_nearby_type"].as<int>();
-    } catch (...) {
-        spdlog::error("Failed to parse YAML config: invalid parameter type conversion");
-        return false;
-    }
-
-    if (ivox_nearby_type == 0) {
-        ivox_options_.nearby_type_ = IVoxType::NearbyType::CENTER;
-    } else if (ivox_nearby_type == 6) {
-        ivox_options_.nearby_type_ = IVoxType::NearbyType::NEARBY6;
-    } else if (ivox_nearby_type == 18) {
-        ivox_options_.nearby_type_ = IVoxType::NearbyType::NEARBY18;
-    } else if (ivox_nearby_type == 26) {
-        ivox_options_.nearby_type_ = IVoxType::NearbyType::NEARBY26;
-    } else {
-        spdlog::warn("Unknown ivox_nearby_type: {}, falling back to NEARBY18", ivox_nearby_type);
-        ivox_options_.nearby_type_ = IVoxType::NearbyType::NEARBY18;
-    }
-
-    voxel_scan_.setLeafSize(filter_size_surf_min, filter_size_surf_min, filter_size_surf_min);
-
-    lidar_T_wrt_IMU = common::VecFromArray<double>(extrinT_);
-    lidar_R_wrt_IMU = common::MatFromArray<double>(extrinR_);
-
-    p_imu_->SetExtrinsic(lidar_T_wrt_IMU, lidar_R_wrt_IMU);
-    p_imu_->SetGyrCov(common::V3D(gyr_cov, gyr_cov, gyr_cov));
-    p_imu_->SetAccCov(common::V3D(acc_cov, acc_cov, acc_cov));
-    p_imu_->SetGyrBiasCov(common::V3D(b_gyr_cov, b_gyr_cov, b_gyr_cov));
-    p_imu_->SetAccBiasCov(common::V3D(b_acc_cov, b_acc_cov, b_acc_cov));
-
-    // Optional: motion-gated IMU init. If the yaml block is absent, legacy
-    // behavior is preserved (MAX_INI_COUNT=20 samples, no gating).
-    //
-    // Two configuration modes:
-    //   a) Explicit sample counts: `min_accepted` / `max_tries`. Precise
-    //      but rate-dependent — 100 samples = 0.5 s at 200 Hz but 0.25 s
-    //      at 400 Hz. Kept for legacy configs and test determinism.
-    //   b) Time-based (preferred default): `min_time_s` / `max_time_s`.
-    //      Sample counts resolved from the IMU rate measured on the first
-    //      IMUInit batch. Works the same across 100 / 200 / 400 Hz IMUs.
-    //
-    // Precedence: ANY count key present → count mode (for the present
-    // field); absent fields fall back to legacy count defaults. No count
-    // keys → time mode with configurable time or default 0.5 s / 5.0 s.
-    if (yaml["imu_init"]) {
-        const auto &ii = yaml["imu_init"];
-        const bool en = ii["motion_gate_enabled"] ? ii["motion_gate_enabled"].as<bool>() : false;
-        const double acc_rel_thresh = ii["acc_rel_thresh"] ? ii["acc_rel_thresh"].as<double>() : 0.05;
-        const double gyr_thresh = ii["gyr_thresh"] ? ii["gyr_thresh"].as<double>() : 0.05;
-
-        const bool has_count_min = static_cast<bool>(ii["min_accepted"]);
-        const bool has_count_max = static_cast<bool>(ii["max_tries"]);
-        const bool has_time_min  = static_cast<bool>(ii["min_time_s"]);
-        const bool has_time_max  = static_cast<bool>(ii["max_time_s"]);
-        const bool has_any_count = has_count_min || has_count_max;
-        const bool has_any_time  = has_time_min  || has_time_max;
-
-        if (has_any_count && has_any_time) {
-            spdlog::warn("Both sample-count (min_accepted/max_tries) and time-based "
-                         "(min_time_s/max_time_s) init-gate keys present in YAML; "
-                         "using sample counts (remove the time keys to silence).");
-        }
-
-        if (has_any_count) {
-            const int min_accepted = has_count_min ? ii["min_accepted"].as<int>()
-                                                   : DEFAULT_INIT_GATE_MIN_ACCEPTED;
-            const int max_tries    = has_count_max ? ii["max_tries"].as<int>()
-                                                   : DEFAULT_INIT_GATE_MAX_TRIES;
-            p_imu_->SetInitMotionGate(en, acc_rel_thresh, gyr_thresh, min_accepted, max_tries);
-        } else {
-            const double min_time_s = has_time_min ? ii["min_time_s"].as<double>()
-                                                   : DEFAULT_INIT_GATE_MIN_TIME_S;
-            const double max_time_s = has_time_max ? ii["max_time_s"].as<double>()
-                                                   : DEFAULT_INIT_GATE_MAX_TIME_S;
-            p_imu_->SetInitMotionGateTime(en, acc_rel_thresh, gyr_thresh, min_time_s, max_time_s);
-        }
-        const bool assume_level = ii["assume_level"] ? ii["assume_level"].as<bool>() : false;
-        p_imu_->SetInitAssumeLevel(assume_level);
-
-        // Optional: initial Kalman covariance diagonal. Missing block OR
-        // missing fields fall back to InitPDiag's struct defaults, which
-        // reproduce the upstream FAST-LIO hard-coded init_P byte-for-byte.
-        // Negative / zero / NaN values are clamped by SetInitPDiag.
-        if (ii["init_P_diag"]) {
-            const auto &p = ii["init_P_diag"];
-            InitPDiag ip;  // struct defaults = legacy values
-            if (p["pos"])       ip.pos       = p["pos"].as<double>();
-            if (p["rot"])       ip.rot       = p["rot"].as<double>();
-            if (p["off_R_L_I"]) ip.off_R_L_I = p["off_R_L_I"].as<double>();
-            if (p["off_T_L_I"]) ip.off_T_L_I = p["off_T_L_I"].as<double>();
-            if (p["vel"])       ip.vel       = p["vel"].as<double>();
-            if (p["bg"])        ip.bg        = p["bg"].as<double>();
-            if (p["ba"])        ip.ba        = p["ba"].as<double>();
-            if (p["grav"])      ip.grav      = p["grav"].as<double>();
-            p_imu_->SetInitPDiag(ip);
-        }
-    }
-
-    // Optional: pose-graph optimization backend. Off by default.
-    if (yaml["pose_graph"]) {
-        const auto &pg = yaml["pose_graph"];
-        pose_graph_enabled_            = pg["enabled"]         ? pg["enabled"].as<bool>()           : false;
-        pg_opts_.keyframe_dist_thresh  = pg["keyframe_dist"]   ? pg["keyframe_dist"].as<double>()   : 0.5;
-        pg_opts_.keyframe_angle_thresh = pg["keyframe_angle"]  ? pg["keyframe_angle"].as<double>()  : 0.175;
-        pg_opts_.optimize_every_n      = pg["optimize_every_n"]? pg["optimize_every_n"].as<int>()   : 10;
-        pg_opts_.max_iterations        = pg["max_iterations"]  ? pg["max_iterations"].as<int>()     : 20;
-        pg_odom_trans_std_             = pg["odom_trans_std"]  ? pg["odom_trans_std"].as<double>()  : pg_odom_trans_std_;
-        pg_odom_rot_std_               = pg["odom_rot_std"]    ? pg["odom_rot_std"].as<double>()    : pg_odom_rot_std_;
-        if (pose_graph_enabled_) {
-            spdlog::info("Pose graph ENABLED: keyframe_dist={:.2f} keyframe_angle={:.3f} optimize_every={} "
-                         "odom_std(t={:.3f}m, r={:.3f}rad)",
-                         pg_opts_.keyframe_dist_thresh, pg_opts_.keyframe_angle_thresh, pg_opts_.optimize_every_n,
-                         pg_odom_trans_std_, pg_odom_rot_std_);
-        }
-    }
-
-    // Loop-closure detection (only takes effect when pose_graph is on too).
-    if (yaml["loop_closure"]) {
-        const auto &lc = yaml["loop_closure"];
-        loop_closure_enabled_                  = lc["enabled"]                ? lc["enabled"].as<bool>()                : false;
-        loop_closer_opts_.revisit_radius       = lc["revisit_radius"]         ? lc["revisit_radius"].as<float>()        : 5.0f;
-        loop_closer_opts_.min_age_frames       = lc["min_age_frames"]         ? lc["min_age_frames"].as<int>()          : 50;
-        loop_closer_opts_.icp_max_correspondence = lc["icp_max_correspondence"] ? lc["icp_max_correspondence"].as<float>() : 0.5f;
-        loop_closer_opts_.icp_max_iterations   = lc["icp_max_iterations"]     ? lc["icp_max_iterations"].as<int>()      : 30;
-        loop_closer_opts_.icp_fitness_threshold = lc["icp_fitness_threshold"] ? lc["icp_fitness_threshold"].as<float>() : 0.3f;
-        loop_closer_opts_.max_candidates_per_call = lc["max_candidates_per_call"] ? lc["max_candidates_per_call"].as<std::size_t>() : 4;
-        loop_closer_opts_.voxel_size           = lc["voxel_size"]             ? lc["voxel_size"].as<float>()            : 0.10f;
-        loop_closer_opts_.max_points_per_submap = lc["max_points_per_submap"] ? lc["max_points_per_submap"].as<std::size_t>() : 200000;
-        loop_closer_opts_.max_submaps          = lc["max_submaps"]            ? lc["max_submaps"].as<std::size_t>()     : 256;
-        // Scan Context (global, pose-independent) knobs — optional.
-        loop_closer_opts_.sc_enabled           = lc["sc_enabled"]           ? lc["sc_enabled"].as<bool>()           : loop_closer_opts_.sc_enabled;
-        loop_closer_opts_.sc_num_rings         = lc["sc_num_rings"]         ? lc["sc_num_rings"].as<int>()          : loop_closer_opts_.sc_num_rings;
-        loop_closer_opts_.sc_num_sectors       = lc["sc_num_sectors"]       ? lc["sc_num_sectors"].as<int>()        : loop_closer_opts_.sc_num_sectors;
-        loop_closer_opts_.sc_max_range         = lc["sc_max_range"]         ? lc["sc_max_range"].as<double>()       : loop_closer_opts_.sc_max_range;
-        loop_closer_opts_.sc_aggregation_window = lc["sc_aggregation_window"]? lc["sc_aggregation_window"].as<int>() : loop_closer_opts_.sc_aggregation_window;
-        loop_closer_opts_.sc_ring_key_threshold = lc["sc_ring_key_threshold"]? lc["sc_ring_key_threshold"].as<double>() : loop_closer_opts_.sc_ring_key_threshold;
-        loop_closer_opts_.sc_score_threshold   = lc["sc_score_threshold"]   ? lc["sc_score_threshold"].as<double>() : loop_closer_opts_.sc_score_threshold;
-        loop_closer_opts_.sc_min_overlap_ratio = lc["sc_min_overlap_ratio"] ? lc["sc_min_overlap_ratio"].as<double>() : loop_closer_opts_.sc_min_overlap_ratio;
-        loop_closer_opts_.sc_top_k             = lc["sc_top_k"]             ? lc["sc_top_k"].as<std::size_t>()      : loop_closer_opts_.sc_top_k;
-        if (loop_closure_enabled_ && !pose_graph_enabled_) {
-            spdlog::warn("Loop closure requested but pose_graph is OFF — disabling LCD. "
-                         "Set pose_graph.enabled: true to use this feature.");
-            loop_closure_enabled_ = false;
-        }
-        if (loop_closure_enabled_) {
-            spdlog::info("Loop closure ENABLED: revisit_r={:.2f}m min_age={} icp_corr={:.2f}m "
-                         "icp_iter={} fitness<{:.2f}m² max_per_call={}",
-                         loop_closer_opts_.revisit_radius, loop_closer_opts_.min_age_frames,
-                         loop_closer_opts_.icp_max_correspondence, loop_closer_opts_.icp_max_iterations,
-                         loop_closer_opts_.icp_fitness_threshold, loop_closer_opts_.max_candidates_per_call);
-            if (loop_closer_opts_.sc_enabled) {
-                spdlog::info("  Scan Context ENABLED: rings={} sectors={} max_range={:.1f}m "
-                             "aggregate={} ring_key<{:.2f} sc_score<{:.2f} top_k={}",
-                             loop_closer_opts_.sc_num_rings, loop_closer_opts_.sc_num_sectors,
-                             loop_closer_opts_.sc_max_range, loop_closer_opts_.sc_aggregation_window,
-                             loop_closer_opts_.sc_ring_key_threshold,
-                             loop_closer_opts_.sc_score_threshold, loop_closer_opts_.sc_top_k);
-            }
-        }
-    }
-
-    // Optional: wheel-odometry fusion. Off by default → no path change.
-    if (yaml["wheel"]) {
-        const auto &w = yaml["wheel"];
-        wheel_enabled_      = w["enabled"]         ? w["enabled"].as<bool>()           : false;
-        wheel_cov_v_x_      = w["cov_v_x"]         ? w["cov_v_x"].as<double>()         : 0.01;
-        wheel_cov_v_y_      = w["cov_v_y"]         ? w["cov_v_y"].as<double>()         : 0.01;
-        wheel_cov_v_z_      = w["cov_v_z"]         ? w["cov_v_z"].as<double>()         : 0.001;
-        wheel_cov_omega_z_  = w["cov_omega_z"]     ? w["cov_omega_z"].as<double>()     : 0.01;
-        wheel_emit_nhc_v_x_ = w["emit_nhc_v_x"]    ? w["emit_nhc_v_x"].as<bool>()      : false;
-        wheel_emit_nhc_v_y_ = w["emit_nhc_v_y"]    ? w["emit_nhc_v_y"].as<bool>()      : true;
-        wheel_emit_nhc_v_z_ = w["emit_nhc_v_z"]    ? w["emit_nhc_v_z"].as<bool>()      : true;
-        wheel_nhc_cov_      = w["nhc_cov"]         ? w["nhc_cov"].as<double>()         : 0.001;
-        wheel_max_time_gap_ = w["max_time_gap"]    ? w["max_time_gap"].as<double>()    : 0.05;
-        if (wheel_enabled_) {
-            spdlog::info("Wheel odometry ENABLED: cov_v_x={:.4f} cov_v_y={:.4f} cov_v_z={:.5f} "
-                         "nhc_x={} nhc_y={} nhc_z={} nhc_cov={:.5f} max_gap={:.3f}s",
-                         wheel_cov_v_x_, wheel_cov_v_y_, wheel_cov_v_z_,
-                         wheel_emit_nhc_v_x_, wheel_emit_nhc_v_y_, wheel_emit_nhc_v_z_,
-                         wheel_nhc_cov_, wheel_max_time_gap_);
-        }
-    }
-
+    ApplyConfig(config);
     return true;
+}
+
+void LaserMapping::ApplyConfig(const LaserMappingConfig &config) {
+    // ── Common + output flags ──────────────────────────────────────────
+    time_sync_en_      = config.common.time_sync_en;
+    path_pub_en_       = config.output.path_en;
+    dense_pub_en_      = config.output.dense_en;
+    path_save_en_      = config.output.path_save_en;
+    pcd_save_en_       = config.output.pcd_save_en;
+    pcd_save_interval_ = config.output.pcd_save_interval;
+
+    // ── IEKF / mapping hyperparams (including global options::*) ───────
+    num_max_iterations_        = config.mapping.max_iteration;
+    esti_plane_threshold_      = config.mapping.esti_plane_threshold;
+    map_quality_threshold_     = config.mapping.map_quality_threshold;
+    outlier_gate_              = config.mapping.outlier_gate;
+    if (outlier_gate_.mode == OutlierGateMode::kMahalanobis) {
+        spdlog::info("Outlier gate: MAHALANOBIS (chi²<{:.2f})", outlier_gate_.mahalanobis_chi2);
+    } else if (outlier_gate_.mode == OutlierGateMode::kEither) {
+        spdlog::info("Outlier gate: EITHER (range_ratio={:.1f}, chi²<{:.2f})",
+                     outlier_gate_.range_ratio, outlier_gate_.mahalanobis_chi2);
+    }  // kRange = legacy default, no log spam
+
+    options::NUM_MAX_ITERATIONS   = num_max_iterations_;
+    options::ESTI_PLANE_THRESHOLD = esti_plane_threshold_;
+    if (config.mapping.laser_point_cov) {
+        options::LASER_POINT_COV = *config.mapping.laser_point_cov;
+        spdlog::info("LASER_POINT_COV overridden from yaml: {:.6f}", options::LASER_POINT_COV);
+    } else {
+        options::LASER_POINT_COV = options::DEFAULT_LASER_POINT_COV;
+    }
+
+    // ── Local-map geometry (voxel grids, cube extent, detection range) ─
+    filter_size_map_min_ = config.mapping.filter_size_map;
+    cube_len_            = config.mapping.cube_side_length;
+    det_range_           = config.mapping.det_range;
+    const float surf = static_cast<float>(config.mapping.filter_size_surf);
+    voxel_scan_.setLeafSize(surf, surf, surf);
+
+    // ── Preprocessing ──────────────────────────────────────────────────
+    preprocess_->SetBlind(config.preprocess.blind);
+    preprocess_->SetPointFilterNum(config.preprocess.point_filter_num);
+
+    // ── iVox index ─────────────────────────────────────────────────────
+    ivox_options_.resolution_ = config.ivox.resolution;
+    switch (config.ivox.nearby_type) {
+        case 0:  ivox_options_.nearby_type_ = IVoxType::NearbyType::CENTER;   break;
+        case 6:  ivox_options_.nearby_type_ = IVoxType::NearbyType::NEARBY6;  break;
+        case 18: ivox_options_.nearby_type_ = IVoxType::NearbyType::NEARBY18; break;
+        case 26: ivox_options_.nearby_type_ = IVoxType::NearbyType::NEARBY26; break;
+        default:
+            spdlog::warn("Unknown ivox_nearby_type: {}, falling back to NEARBY18",
+                         config.ivox.nearby_type);
+            ivox_options_.nearby_type_ = IVoxType::NearbyType::NEARBY18;
+            break;
+    }
+
+    // ── LiDAR↔IMU extrinsic ────────────────────────────────────────────
+    extrinsic_est_en_ = config.extrinsics.estimate_online;
+    extrinT_          = config.extrinsics.T;
+    extrinR_          = config.extrinsics.R;
+    p_imu_->SetExtrinsic(common::VecFromArray<double>(extrinT_),
+                         common::MatFromArray<double>(extrinR_));
+
+    // ── Process-noise densities (Q_ diagonal) ──────────────────────────
+    const auto &pn = config.process_noise;
+    p_imu_->SetGyrCov    (common::V3D(pn.ng,  pn.ng,  pn.ng));
+    p_imu_->SetAccCov    (common::V3D(pn.na,  pn.na,  pn.na));
+    p_imu_->SetGyrBiasCov(common::V3D(pn.nbg, pn.nbg, pn.nbg));
+    p_imu_->SetAccBiasCov(common::V3D(pn.nba, pn.nba, pn.nba));
+
+    // ── IMU init gate + leveling + init_P_diag ─────────────────────────
+    const auto &ii = config.imu_init;
+    if (ii.gate_mode == ImuInitSettings::GateMode::kCountBased) {
+        p_imu_->SetInitMotionGate(ii.motion_gate_enabled, ii.acc_rel_thresh, ii.gyr_thresh,
+                                  ii.min_accepted, ii.max_tries);
+    } else {
+        p_imu_->SetInitMotionGateTime(ii.motion_gate_enabled, ii.acc_rel_thresh, ii.gyr_thresh,
+                                      ii.min_time_s, ii.max_time_s);
+    }
+    p_imu_->SetInitAssumeLevel(ii.assume_level);
+    if (ii.init_P_diag) {
+        p_imu_->SetInitPDiag(*ii.init_P_diag);
+    }
+
+    // ── Pose graph ─────────────────────────────────────────────────────
+    pose_graph_enabled_ = config.pose_graph.enabled;
+    pg_opts_            = config.pose_graph.options;
+    pg_odom_trans_std_  = config.pose_graph.odom_trans_std;
+    pg_odom_rot_std_    = config.pose_graph.odom_rot_std;
+    if (pose_graph_enabled_) {
+        spdlog::info("Pose graph ENABLED: keyframe_dist={:.2f} keyframe_angle={:.3f} optimize_every={} "
+                     "odom_std(t={:.3f}m, r={:.3f}rad)",
+                     pg_opts_.keyframe_dist_thresh, pg_opts_.keyframe_angle_thresh,
+                     pg_opts_.optimize_every_n, pg_odom_trans_std_, pg_odom_rot_std_);
+    }
+
+    // ── Loop closure (cross-block gate already applied by parser) ──────
+    loop_closure_enabled_ = config.loop_closure.enabled;
+    loop_closer_opts_     = config.loop_closure.options;
+    if (loop_closure_enabled_) {
+        spdlog::info("Loop closure ENABLED: revisit_r={:.2f}m min_age={} icp_corr={:.2f}m "
+                     "icp_iter={} fitness<{:.2f}m² max_per_call={}",
+                     loop_closer_opts_.revisit_radius, loop_closer_opts_.min_age_frames,
+                     loop_closer_opts_.icp_max_correspondence, loop_closer_opts_.icp_max_iterations,
+                     loop_closer_opts_.icp_fitness_threshold, loop_closer_opts_.max_candidates_per_call);
+        if (loop_closer_opts_.sc_enabled) {
+            spdlog::info("  Scan Context ENABLED: rings={} sectors={} max_range={:.1f}m "
+                         "aggregate={} ring_key<{:.2f} sc_score<{:.2f} top_k={}",
+                         loop_closer_opts_.sc_num_rings, loop_closer_opts_.sc_num_sectors,
+                         loop_closer_opts_.sc_max_range, loop_closer_opts_.sc_aggregation_window,
+                         loop_closer_opts_.sc_ring_key_threshold,
+                         loop_closer_opts_.sc_score_threshold, loop_closer_opts_.sc_top_k);
+        }
+    }
+
+    // ── Wheel odometry ─────────────────────────────────────────────────
+    const auto &w = config.wheel;
+    wheel_enabled_      = w.enabled;
+    wheel_cov_v_x_      = w.cov_v_x;
+    wheel_cov_v_y_      = w.cov_v_y;
+    wheel_cov_v_z_      = w.cov_v_z;
+    wheel_cov_omega_z_  = w.cov_omega_z;
+    wheel_emit_nhc_v_x_ = w.emit_nhc_v_x;
+    wheel_emit_nhc_v_y_ = w.emit_nhc_v_y;
+    wheel_emit_nhc_v_z_ = w.emit_nhc_v_z;
+    wheel_nhc_cov_      = w.nhc_cov;
+    wheel_max_time_gap_ = w.max_time_gap;
+    if (wheel_enabled_) {
+        spdlog::info("Wheel odometry ENABLED: cov_v_x={:.4f} cov_v_y={:.4f} cov_v_z={:.5f} "
+                     "nhc_x={} nhc_y={} nhc_z={} nhc_cov={:.5f} max_gap={:.3f}s",
+                     wheel_cov_v_x_, wheel_cov_v_y_, wheel_cov_v_z_,
+                     wheel_emit_nhc_v_x_, wheel_emit_nhc_v_y_, wheel_emit_nhc_v_z_,
+                     wheel_nhc_cov_, wheel_max_time_gap_);
+    }
 }
 
 LaserMapping::LaserMapping() {
@@ -458,11 +317,11 @@ Odometry LaserMapping::GetCurrentOdometry() const {
 }
 
 void LaserMapping::Run() {
+    // ── Phase 1: init guard + sync lidar/imu packages ──────────────────
     if (!initialized_) {
         spdlog::warn("Run() called before Init(), ignoring");
         return;
     }
-
     if (!SyncPackages()) {
         return;
     }
@@ -473,7 +332,7 @@ void LaserMapping::Run() {
     auto t0 = clk::now();
 #endif
 
-    /// IMU process, kf prediction, undistortion
+    // ── Phase 2: IMU prediction + scan undistortion ────────────────────
     p_imu_->Process(measures_, kf_, scan_undistort_);
     if (scan_undistort_->empty() || (scan_undistort_ == nullptr)) {
         spdlog::warn("Empty undistorted scan, skipping frame");
@@ -484,7 +343,7 @@ void LaserMapping::Run() {
     diag_t_undistort_us_ = std::chrono::duration_cast<std::chrono::microseconds>(clk::now() - t0).count();
 #endif
 
-    /// the first scan
+    // ── Phase 3: first-scan seed — push directly into the empty iVox ───
     if (flg_first_scan_) {
         state_point_ = kf_.get_x();
         scan_down_world_->resize(scan_undistort_->size());
@@ -498,7 +357,7 @@ void LaserMapping::Run() {
     }
     flg_EKF_inited_ = (measures_.lidar_bag_time_ - first_lidar_time_) >= options::INIT_TIME;
 
-    /// downsample
+    // ── Phase 4: downsample + allocate per-point buffers ───────────────
 #ifdef FASTER_LIO_ENABLE_DIAGNOSTICS
     t0 = clk::now();
 #endif
@@ -514,18 +373,20 @@ void LaserMapping::Run() {
 
     int cur_pts = scan_down_body_->size();
     if (cur_pts < 5) {
-        spdlog::warn("Too few points after downsampling ({} -> {}), skipping frame", scan_undistort_->size(), scan_down_body_->size());
+        spdlog::warn("Too few points after downsampling ({} -> {}), skipping frame",
+                     scan_undistort_->size(), scan_down_body_->size());
         return;
     }
     scan_down_world_->resize(cur_pts);
     nearest_points_.resize(cur_pts);
-    // No value-init needed: ObsModel writes every element of residuals_ and point_selected_surf_
+    // No value-init needed: ObsModel writes every element of residuals_
+    // and point_selected_surf_ on each iteration.
     residuals_.resize(cur_pts);
     fit_quality_.resize(cur_pts, 0.0f);
     point_selected_surf_.resize(cur_pts);
     plane_coef_.resize(cur_pts, common::V4F::Zero());
 
-    // ICP and iterated Kalman filter update
+    // ── Phase 5: iterated Kalman update (LiDAR ICP) + optional wheel ──
 #ifdef FASTER_LIO_ENABLE_DIAGNOSTICS
     t0 = clk::now();
 #endif
@@ -536,8 +397,8 @@ void LaserMapping::Run() {
             // Optional: wheel-odom sequential update. No-op when disabled.
             ApplyWheelObservations(lidar_end_time_);
             state_point_ = kf_.get_x();
-            euler_cur_ = SO3ToEuler(state_point_.rot);
-            pos_lidar_ = state_point_.pos + state_point_.rot * state_point_.offset_T_L_I;
+            euler_cur_   = SO3ToEuler(state_point_.rot);
+            pos_lidar_   = state_point_.pos + state_point_.rot * state_point_.offset_T_L_I;
         },
         "IEKF Solve and Update");
 #ifdef FASTER_LIO_ENABLE_DIAGNOSTICS
@@ -545,30 +406,34 @@ void LaserMapping::Run() {
     t0 = clk::now();
 #endif
 
+    // ── Phase 6: pose-graph keyframe + optional LCD ────────────────────
     MaybeUpdatePoseGraph();
 
-    // update local map
+    // ── Phase 7: incremental map update ────────────────────────────────
     Timer::Evaluate([&, this]() { MapIncremental(); }, "    Incremental Mapping");
 #ifdef FASTER_LIO_ENABLE_DIAGNOSTICS
-    diag_t_mapinc_us_ = std::chrono::duration_cast<std::chrono::microseconds>(clk::now() - t0).count();
+    diag_t_mapinc_us_    = std::chrono::duration_cast<std::chrono::microseconds>(clk::now() - t0).count();
     diag_t_run_total_us_ = std::chrono::duration_cast<std::chrono::microseconds>(clk::now() - t_run_start).count();
 #endif
 
     spdlog::debug("Mapping frame {}: input={} downsampled={} map_grids={} effective_features={}",
-                  frame_num_, scan_undistort_->points.size(), cur_pts, ivox_->NumValidGrids(), effect_feat_num_);
+                  frame_num_, scan_undistort_->points.size(), cur_pts,
+                  ivox_->NumValidGrids(), effect_feat_num_);
 
-    // update pose and path
+    // ── Phase 8: publish pose + trajectory (mutex-guarded) ─────────────
     {
         std::lock_guard<std::mutex> lock(mtx_state_);
         SetPosestamp(msg_body_pose_);
         msg_body_pose_.timestamp = lidar_end_time_;
-        // Apply pose graph correction to the output pose (IEKF state is untouched).
+        // Apply pose-graph correction to the PUBLISHED pose. IEKF state
+        // stays un-corrected so the filter's incremental estimates remain
+        // consistent; only external consumers see the optimized trajectory.
         if (pose_graph_enabled_ && pose_graph_ && pose_graph_->HasOptimized()) {
             Eigen::Isometry3d raw = Eigen::Isometry3d::Identity();
-            raw.linear() = msg_body_pose_.pose.orientation.toRotationMatrix();
+            raw.linear()      = msg_body_pose_.pose.orientation.toRotationMatrix();
             raw.translation() = msg_body_pose_.pose.position;
             Eigen::Isometry3d corrected = pg_correction_ * raw;
-            msg_body_pose_.pose.position = corrected.translation();
+            msg_body_pose_.pose.position    = corrected.translation();
             msg_body_pose_.pose.orientation = Eigen::Quaterniond(corrected.rotation());
         }
         if (path_pub_en_ || path_save_en_) {
@@ -576,7 +441,7 @@ void LaserMapping::Run() {
         }
     }
 
-    // save map pcd if enabled
+    // ── Phase 9: optional PCD dump + diagnostics row ───────────────────
     if (pcd_save_en_) {
         SaveFrameWorld();
     }
@@ -585,7 +450,6 @@ void LaserMapping::Run() {
     WriteDiagnosticsRow();
 #endif
 
-    // Debug variables
     frame_num_++;
 }
 
@@ -775,10 +639,29 @@ void LaserMapping::ObsModel(state_ikfom &s, esekfom::dyn_share_datastruct<double
         index[i] = i;
     }
 
+    // Pre-compute the state-covariance block used by the Mahalanobis gate.
+    // The 12-DoF block covers pos, rot, offset_R_L_I, offset_T_L_I — the
+    // only state components that appear in H for a plane observation.
+    // Copied once outside the parallel loop so every worker reads a stable
+    // snapshot; kf_ is not mutated during ObsModel (IEKF applies the
+    // update only after this callback returns).
+    const bool use_mahalanobis =
+        outlier_gate_.mode == OutlierGateMode::kMahalanobis ||
+        outlier_gate_.mode == OutlierGateMode::kEither;
+    Eigen::Matrix<double, 12, 12> P_12 = Eigen::Matrix<double, 12, 12>::Zero();
+    if (use_mahalanobis) {
+        P_12 = kf_.get_P().block<12, 12>(0, 0);
+    }
+    const double R_obs = options::LASER_POINT_COV;
+
     Timer::Evaluate(
         [&, this]() {
             auto R_wl = (s.rot * s.offset_R_L_I).cast<float>();
             auto t_wl = (s.rot * s.offset_T_L_I + s.pos).cast<float>();
+            // Extra state blocks used by the Mahalanobis H_i computation.
+            const common::M3F Rt_gate    = s.rot.toRotationMatrix().transpose().cast<float>();
+            const common::M3F off_R_gate = s.offset_R_L_I.toRotationMatrix().cast<float>();
+            const common::V3F off_t_gate = s.offset_T_L_I.cast<float>();
 
             faster_lio::compat::for_each(faster_lio::compat::par_unseq, index.begin(), index.end(), [&](const size_t &i) {
                 PointType &point_body = scan_down_body_->points[i];
@@ -803,9 +686,49 @@ void LaserMapping::ObsModel(state_ikfom &s, esekfom::dyn_share_datastruct<double
                 if (point_selected_surf_[i]) {
                     auto temp = point_world.getVector4fMap();
                     temp[3] = 1.0;
-                    float pd2 = plane_coef_[i].dot(temp);
+                    const float pd2 = plane_coef_[i].dot(temp);
+                    const double range = static_cast<double>(p_body.norm());
+                    const double residual = static_cast<double>(pd2);
 
-                    bool valid_corr = p_body.norm() > 81 * pd2 * pd2;
+                    bool valid_corr = false;
+                    if (outlier_gate_.mode == OutlierGateMode::kRange) {
+                        // Legacy fast path — no covariance work.
+                        valid_corr = outlier_gate::AcceptRange(
+                            range, residual, outlier_gate_.range_ratio);
+                    } else {
+                        // Mahalanobis / Either: need H_i and innovation_var.
+                        // H_i mirrors the jacobian build in the second
+                        // loop below; kept here for the gate so that
+                        // point_selected_surf_ is finalised before
+                        // compaction. Kept local (not factored into a
+                        // helper) so a reader sees the gate formula
+                        // inline next to its use.
+                        const common::V3F norm_vec       = plane_coef_[i].head<3>();
+                        const common::V3F point_this     = off_R_gate * p_body + off_t_gate;
+                        const common::M3F point_crossmat = SKEW_SYM_MATRIX(point_this);
+                        const common::V3F C              = Rt_gate * norm_vec;
+                        const common::V3F A              = point_crossmat * C;
+                        Eigen::Matrix<double, 1, 12> h_x;
+                        h_x << norm_vec[0], norm_vec[1], norm_vec[2],
+                               A[0], A[1], A[2], 0, 0, 0, 0, 0, 0;
+                        if (extrinsic_est_en_) {
+                            const common::M3F point_be_crossmat = SKEW_SYM_MATRIX(p_body);
+                            const common::V3F B = point_be_crossmat * off_R_gate.transpose() * C;
+                            h_x(0, 6)  = B[0];  h_x(0, 7)  = B[1];  h_x(0, 8)  = B[2];
+                            h_x(0, 9)  = C[0];  h_x(0, 10) = C[1];  h_x(0, 11) = C[2];
+                        }
+                        const double innov_var = (h_x * P_12 * h_x.transpose())(0, 0) + R_obs;
+
+                        if (outlier_gate_.mode == OutlierGateMode::kMahalanobis) {
+                            valid_corr = outlier_gate::AcceptMahalanobis(
+                                residual, innov_var, outlier_gate_.mahalanobis_chi2);
+                        } else {  // kEither
+                            valid_corr = outlier_gate::AcceptEither(
+                                range, residual, innov_var,
+                                outlier_gate_.range_ratio, outlier_gate_.mahalanobis_chi2);
+                        }
+                    }
+
                     if (valid_corr) {
                         point_selected_surf_[i] = true;
                         residuals_[i] = pd2;
@@ -970,25 +893,33 @@ void LaserMapping::Savetrajectory(const std::string &traj_file) {
 
 ///////////////////////////  private method /////////////////////////////////////////////////////////////////////
 
-void LaserMapping::PointBodyToWorld(const PointType *pi, PointType *const po) {
-    common::V3D p_body(pi->x, pi->y, pi->z);
-    common::V3D p_global(state_point_.rot * (state_point_.offset_R_L_I * p_body + state_point_.offset_T_L_I) +
-                         state_point_.pos);
+// Core body→world transform. Both public overloads delegate here so the
+// rotation/translation math lives in one place and future changes (e.g.
+// adding a pose-graph correction to the world frame) only need to touch
+// this function.
+namespace {
+inline common::V3D BodyToWorld(const state_ikfom &s, const common::V3D &p_body) {
+    return s.rot * (s.offset_R_L_I * p_body + s.offset_T_L_I) + s.pos;
+}
+}  // namespace
 
-    po->x = p_global(0);
-    po->y = p_global(1);
-    po->z = p_global(2);
+void LaserMapping::PointBodyToWorld(const PointType *pi, PointType *const po) {
+    const common::V3D p_world = BodyToWorld(state_point_, common::V3D(pi->x, pi->y, pi->z));
+    po->x = p_world(0);
+    po->y = p_world(1);
+    po->z = p_world(2);
     po->intensity = pi->intensity;
 }
 
+// V3F overload — called from SaveFrameWorld. Historically stamps
+// `intensity = |z|` to colour saved PCDs by height; preserved for that
+// debugging pattern. If you need the real point intensity, construct a
+// PointType instead and call the overload above.
 void LaserMapping::PointBodyToWorld(const common::V3F &pi, PointType *const po) {
-    common::V3D p_body(pi.x(), pi.y(), pi.z());
-    common::V3D p_global(state_point_.rot * (state_point_.offset_R_L_I * p_body + state_point_.offset_T_L_I) +
-                         state_point_.pos);
-
-    po->x = p_global(0);
-    po->y = p_global(1);
-    po->z = p_global(2);
+    const common::V3D p_world = BodyToWorld(state_point_, common::V3D(pi.x(), pi.y(), pi.z()));
+    po->x = p_world(0);
+    po->y = p_world(1);
+    po->z = p_world(2);
     po->intensity = std::abs(po->z);
 }
 

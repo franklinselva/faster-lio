@@ -13,6 +13,7 @@
 
 #include "faster_lio/imu_processing.h"
 #include "ivox3d/ivox3d.h"
+#include "faster_lio/laser_mapping_config.h"
 #include "faster_lio/loop_closer.h"
 #include "faster_lio/pointcloud_preprocess.h"
 #include "faster_lio/pose_graph.h"
@@ -56,12 +57,25 @@ class LaserMapping {
     /// Must be called from a single thread. NOT re-entrant.
     void Run();
 
-    // input API — thread-safe, can be called from sensor callback threads
+    // input API — lock-free SPSC-queue backed, so each Add* method is
+    // "single-producer → single-consumer (Run())" safe. CONTRACT:
+    //   - All AddIMU calls must come from ONE producer thread (e.g. the
+    //     IMU sensor callback). Same constraint for AddPointCloud and
+    //     AddWheelOdom, each on its own producer thread (the three input
+    //     queues are independent).
+    //   - If the caller has multiple IMU producers, it must externally
+    //     serialize them (mutex) before calling AddIMU.
+    //   - Run() is the sole consumer. Calling Run() from multiple threads
+    //     concurrently is undefined behaviour (see Run()'s own docstring).
+    //
+    // Non-blocking: on queue saturation the Add* methods drop the sample
+    // and log a warning; they never block the producer thread.
     void AddIMU(const IMUData &imu);
     void AddPointCloud(const PointCloudType::Ptr &cloud, double timestamp);
     /// Optional wheel-odometry observation. Caller fills a `WheelOdomData`
     /// with whichever body-frame velocity components its chassis can
     /// measure (see types.h). No-op unless `wheel.enabled: true` in yaml.
+    /// Same single-producer contract as AddIMU/AddPointCloud.
     void AddWheelOdom(const WheelOdomData &odom);
 
     // output API — thread-safe, can be called concurrently with Run()
@@ -123,6 +137,13 @@ class LaserMapping {
 
     bool LoadParamsFromYAML(const std::string &yaml);
 
+    /// Apply a parsed LaserMappingConfig to all downstream modules and
+    /// member fields. Called from LoadParamsFromYAML after the config
+    /// is resolved. Separated so parsing and application can be tested
+    /// independently, and so adding a YAML key does not require touching
+    /// the application logic unless it also plumbs into a module setter.
+    void ApplyConfig(const LaserMappingConfig &config);
+
     void PrintState(const state_ikfom &s);
 
     void SaveFrameWorld();
@@ -138,7 +159,6 @@ class LaserMapping {
     float det_range_ = 300.0f;
     double cube_len_ = 0;
     double filter_size_map_min_ = 0;
-    bool localmap_initialized_ = false;
 
     /// params
     std::vector<double> extrinT_{3, 0.0};  // lidar-imu translation
@@ -188,6 +208,7 @@ class LaserMapping {
     int num_max_iterations_ = 4;
     float esti_plane_threshold_ = 0.1f;
     float map_quality_threshold_ = 0.0f;  // 0 = disabled; points with fit_quality > this are excluded from map
+    OutlierGateSettings outlier_gate_{};   // per-point outlier-rejection config (see outlier_gate.h)
     bool time_sync_en_ = false;
     double timediff_lidar_wrt_imu_ = 0.0;
     double last_timestamp_lidar_ = 0;
@@ -254,7 +275,6 @@ class LaserMapping {
     bool path_pub_en_ = true;
     bool dense_pub_en_ = false;
     bool pcd_save_en_ = false;
-    bool runtime_pos_log_ = true;
     int pcd_save_interval_ = -1;
     bool path_save_en_ = false;
 

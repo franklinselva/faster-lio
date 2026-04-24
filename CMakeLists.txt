@@ -124,6 +124,7 @@ endif()
 # Library
 add_library(${PROJECT_NAME}
     src/laser_mapping.cc
+    src/laser_mapping_config.cc
     src/pointcloud_preprocess.cc
     src/imu_processing.cc
     src/options.cc
@@ -235,4 +236,6 @@ if(BUILD_TESTS)
     add_faster_lio_test(test_pose_graph test_pose_graph.cc)
     add_faster_lio_test(test_scan_context test_scan_context.cc)
     add_faster_lio_test(test_imu_init_params test_imu_init_params.cc)
+    add_faster_lio_test(test_laser_mapping_config test_laser_mapping_config.cc)
+    add_faster_lio_test(test_outlier_gate test_outlier_gate.cc)
 endif()
