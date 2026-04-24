@@ -31,7 +31,9 @@
 
 #include <Eigen/Dense>
 
+#include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <vector>
 
 namespace faster_lio {
@@ -61,34 +63,64 @@ inline double ComputeScalarNIS(double residual,
 }
 
 /// Per-frame NIS aggregator. Caller calls Push() for each accepted
-/// LiDAR observation in a frame, then reads mean/max/count for logging.
-/// Reset() between frames.
+/// LiDAR observation in a frame, then reads mean/max/p50/p95/count for
+/// logging. Reset() between frames.
 ///
-/// Kept deliberately simple — no variance estimate, no histogram — so
-/// it's cheap enough to run in every frame even on a resource-constrained
-/// target. Higher-order statistics can be reconstructed offline from the
-/// raw per-frame mean / max / count if needed.
+/// p50 / p95 are computed lazily by sorting a per-frame buffer the first
+/// time they're requested. Mean alone hides a heavy tail — under
+/// mahalanobis truncation the bulk of NIS values cluster well below 1.0
+/// while the tail saturates at the χ² threshold. p95 makes that visible.
 struct NISAggregator {
     int    n        = 0;
     double sum      = 0.0;
     double max_nis  = 0.0;
+    // Per-frame samples for percentile estimation. Reserved up front to
+    // avoid reallocations on hot scans (~10–60k observations / frame on
+    // dense LiDAR) and cleared on Reset().
+    std::vector<float> values;
 
     void Push(double nis_value) {
         if (!std::isfinite(nis_value) || nis_value < 0.0) return;
         ++n;
         sum += nis_value;
         if (nis_value > max_nis) max_nis = nis_value;
+        values.push_back(static_cast<float>(nis_value));
     }
 
     void Reset() {
         n       = 0;
         sum     = 0.0;
         max_nis = 0.0;
+        values.clear();
     }
 
     int count() const { return n; }
     double mean() const { return n > 0 ? sum / n : 0.0; }
     double max() const { return max_nis; }
+
+    /// Linear-interpolated quantile q ∈ [0, 1]. Sorts `values` in place
+    /// (idempotent — re-sorting a sorted vector is O(n)). Returns 0 when
+    /// the aggregator is empty.
+    double quantile(double q) {
+        if (values.empty()) return 0.0;
+        if (q <= 0.0) {
+            std::sort(values.begin(), values.end());
+            return values.front();
+        }
+        if (q >= 1.0) {
+            std::sort(values.begin(), values.end());
+            return values.back();
+        }
+        std::sort(values.begin(), values.end());
+        const double idx = q * (values.size() - 1);
+        const auto lo = static_cast<size_t>(std::floor(idx));
+        const auto hi = static_cast<size_t>(std::ceil(idx));
+        const double frac = idx - lo;
+        return values[lo] + frac * (values[hi] - values[lo]);
+    }
+
+    double p50() { return quantile(0.5); }
+    double p95() { return quantile(0.95); }
 };
 
 }  // namespace nis

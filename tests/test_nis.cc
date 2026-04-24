@@ -233,3 +233,76 @@ TEST(NISAggregator, ChiSquareOneMeansConvergesToOne) {
     EXPECT_NEAR(agg.mean(), 1.0, 0.1)
         << "χ²(1) mean should converge to 1 — aggregator is mis-adding.";
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// Percentiles — p50 / p95.
+// ═══════════════════════════════════════════════════════════════════════
+
+TEST(NISAggregator, PercentilesEmptyAreZero) {
+    NISAggregator agg;
+    EXPECT_DOUBLE_EQ(agg.p50(), 0.0);
+    EXPECT_DOUBLE_EQ(agg.p95(), 0.0);
+}
+
+// Linear-interpolated quantile on five points {0,1,2,3,4}. p50 falls
+// exactly on index 2 → value 2. p95 falls at idx 0.95·4 = 3.8 → between
+// values[3]=3 and values[4]=4 with frac=0.8 → 3 + 0.8·1 = 3.8.
+TEST(NISAggregator, PercentilesLinearInterpolationFiveValues) {
+    NISAggregator agg;
+    for (double v : {4.0, 0.0, 2.0, 1.0, 3.0}) agg.Push(v);  // out of order
+    EXPECT_DOUBLE_EQ(agg.p50(), 2.0);
+    EXPECT_NEAR(agg.p95(), 3.8, 1e-6);
+}
+
+// Single value → both percentiles return that value.
+TEST(NISAggregator, PercentilesSingleValueIsValue) {
+    NISAggregator agg;
+    agg.Push(7.5);
+    EXPECT_DOUBLE_EQ(agg.p50(), 7.5);
+    EXPECT_DOUBLE_EQ(agg.p95(), 7.5);
+}
+
+// Reset clears the internal value buffer too — otherwise the next frame's
+// percentiles would smear in last frame's distribution.
+TEST(NISAggregator, ResetClearsValuesBuffer) {
+    NISAggregator agg;
+    for (double v : {1.0, 2.0, 3.0, 4.0, 5.0}) agg.Push(v);
+    EXPECT_GT(agg.p50(), 0.0);
+    agg.Reset();
+    EXPECT_DOUBLE_EQ(agg.p50(), 0.0);
+    EXPECT_DOUBLE_EQ(agg.p95(), 0.0);
+    EXPECT_TRUE(agg.values.empty());
+}
+
+// Push order doesn't matter for percentiles — the quantile sorts
+// internally. Pinned because mean alone is order-invariant but max sees
+// the running maximum, so it's worth pinning the percentile path too.
+TEST(NISAggregator, PercentilesAreSortInvariant) {
+    NISAggregator agg_a, agg_b;
+    for (double v : {0.1, 1.0, 0.5, 2.0, 0.7, 5.0, 0.3}) agg_a.Push(v);
+    for (double v : {5.0, 0.7, 0.3, 0.5, 1.0, 0.1, 2.0}) agg_b.Push(v);
+    EXPECT_DOUBLE_EQ(agg_a.p50(), agg_b.p50());
+    EXPECT_DOUBLE_EQ(agg_a.p95(), agg_b.p95());
+}
+
+// χ²(1) median is the 0.5-quantile of squared standard-normal samples,
+// which has the closed-form value qchisq(0.5, df=1) ≈ 0.4549. p95 is
+// qchisq(0.95, df=1) ≈ 3.8415. With 10k IID samples the sample
+// quantiles are ~σ_p50 ≈ 0.024 and ~σ_p95 ≈ 0.031 (asymptotic normal
+// quantile theory) so a tolerance of 0.1 is comfortably ~3σ on both.
+// The percentiles are what mahalanobis-mode NIS interpretation hinges
+// on: p95 sees the saturation behaviour at the χ² gate, p50 reads the
+// distribution centre that mean dilutes with the heavy tail.
+TEST(NISAggregator, ChiSquareOnePercentilesMatchClosedForm) {
+    NISAggregator agg;
+    std::mt19937 rng(42);
+    std::normal_distribution<double> N(0.0, 1.0);
+    for (int i = 0; i < 10000; ++i) {
+        const double z = N(rng);
+        agg.Push(z * z);                                       // χ²(1)
+    }
+    EXPECT_NEAR(agg.p50(), 0.455, 0.1)
+        << "χ²(1) median should converge to ≈ 0.4549.";
+    EXPECT_NEAR(agg.p95(), 3.841, 0.15)
+        << "χ²(1) p95 should converge to ≈ 3.8415.";
+}

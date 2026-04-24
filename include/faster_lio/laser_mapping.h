@@ -229,6 +229,8 @@ class LaserMapping {
     int    last_nis_count_ = 0;
     double last_nis_mean_  = 0.0;
     double last_nis_max_   = 0.0;
+    double last_nis_p50_   = 0.0;
+    double last_nis_p95_   = 0.0;
 
    public:
     // Diagnostics accessors for the observability guard — read-only snapshots
@@ -247,6 +249,14 @@ class LaserMapping {
     int    LastNISCount() const { return last_nis_count_; }
     double LastNISMean()  const { return last_nis_mean_; }
     double LastNISMax()   const { return last_nis_max_; }
+    double LastNISP50()   const { return last_nis_p50_; }
+    double LastNISP95()   const { return last_nis_p95_; }
+
+    // Outlier-gate mode currently in effect. Needed by callers that
+    // interpret NIS — mahalanobis truncates the per-frame distribution
+    // (only-accepted observations contribute), so the calibrated mean
+    // shifts down vs the unrestricted χ²(1) ideal of 1.0.
+    OutlierGateMode GetOutlierGateMode() const { return outlier_gate_.mode; }
 
    private:
     bool time_sync_en_ = false;

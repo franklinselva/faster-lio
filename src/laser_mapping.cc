@@ -876,6 +876,8 @@ void LaserMapping::ObsModel(state_ikfom &s, esekfom::dyn_share_datastruct<double
     last_nis_count_ = nis_agg.count();
     last_nis_mean_  = nis_agg.mean();
     last_nis_max_   = nis_agg.max();
+    last_nis_p50_   = nis_agg.p50();
+    last_nis_p95_   = nis_agg.p95();
 }
 
 /////////////////////////////////////  debug save / show /////////////////////////////////////////////////////
