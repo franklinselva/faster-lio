@@ -6,6 +6,8 @@
 #include <stdexcept>
 #include <string>
 
+#include "faster_lio/observability_guard.h"
+
 namespace faster_lio {
 
 namespace {
@@ -84,6 +86,25 @@ void ParseMapping(const YAML::Node &yaml, MappingSettings &out) {
         }
         gate.range_ratio      = readOptional<double>(og, "range_ratio",      gate.range_ratio);
         gate.mahalanobis_chi2 = readOptional<double>(og, "mahalanobis_chi2", gate.mahalanobis_chi2);
+    }
+
+    // Optional observability-guard sub-block. Absent → struct defaults
+    // (mode=ignore, min_translation_rank=3, threshold=1e-4 — analyse-only
+    // baseline that preserves legacy behaviour).
+    if (mapping["observability_guard"]) {
+        const auto &og = mapping["observability_guard"];
+        auto &guard = out.observability_guard;
+        if (og["mode"]) {
+            const auto mode_str = og["mode"].as<std::string>();
+            if (!ParseObservabilityGuardMode(mode_str, guard.mode)) {
+                throw std::runtime_error(
+                    std::string("mapping.observability_guard.mode must be one of "
+                                "'ignore' / 'skip_position' / 'skip_update' — got '") +
+                    mode_str + "'");
+            }
+        }
+        guard.min_translation_rank = readOptional<int>   (og, "min_translation_rank", guard.min_translation_rank);
+        guard.singular_threshold   = readOptional<double>(og, "singular_threshold",   guard.singular_threshold);
     }
 }
 

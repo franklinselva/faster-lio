@@ -6,6 +6,8 @@
 #include "faster_lio/compat.h"
 
 #include "faster_lio/laser_mapping.h"
+#include "faster_lio/nis.h"
+#include "faster_lio/observability_guard.h"
 #include "faster_lio/outlier_gate.h"
 #include "faster_lio/utils.h"
 
@@ -84,6 +86,14 @@ void LaserMapping::ApplyConfig(const LaserMappingConfig &config) {
         spdlog::info("Outlier gate: EITHER (range_ratio={:.1f}, chi²<{:.2f})",
                      outlier_gate_.range_ratio, outlier_gate_.mahalanobis_chi2);
     }  // kRange = legacy default, no log spam
+
+    observability_guard_ = config.mapping.observability_guard;
+    if (observability_guard_.mode != ObservabilityGuardMode::kIgnore) {
+        spdlog::info("Observability guard: {} (min_rank={}, σ_thresh={:.2e})",
+                     ObservabilityGuardModeName(observability_guard_.mode),
+                     observability_guard_.min_translation_rank,
+                     observability_guard_.singular_threshold);
+    }
 
     options::NUM_MAX_ITERATIONS   = num_max_iterations_;
     options::ESTI_PLANE_THRESHOLD = esti_plane_threshold_;
@@ -796,6 +806,76 @@ void LaserMapping::ObsModel(state_ikfom &s, esekfom::dyn_share_datastruct<double
             });
         },
         "    ObsModel (IEKF Build Jacobian)");
+
+    // ── Observability guard ────────────────────────────────────────────
+    // Analyses the stacked jacobian for rank deficiency on the translation
+    // (cols 0..2) and rotation (cols 3..5) blocks. See observability_guard.h
+    // for the math. Runs once per frame on the post-loop N×12 matrix, so
+    // the cost is one 3×3 SVD regardless of N.
+    const auto obs_summary =
+        AnalyzeJacobian(ekfom_data.h_x, observability_guard_.singular_threshold);
+    last_obs_translation_rank_        = obs_summary.translation_rank;
+    last_obs_rotation_rank_           = obs_summary.rotation_rank;
+    last_obs_min_singular_translation_ = obs_summary.min_singular_translation;
+
+    switch (observability_guard_.mode) {
+        case ObservabilityGuardMode::kIgnore:
+            // Analyse-only baseline — log at debug so the info is available
+            // in traces but doesn't spam at info level every frame.
+            spdlog::debug("ObsGuard[ignore]: t_rank={} r_rank={} σ_t_min={:.3e}",
+                          obs_summary.translation_rank,
+                          obs_summary.rotation_rank,
+                          obs_summary.min_singular_translation);
+            break;
+        case ObservabilityGuardMode::kSkipPosition:
+            if (obs_summary.translation_rank < observability_guard_.min_translation_rank) {
+                ZeroTranslationColumns(ekfom_data.h_x);
+                ++obs_guard_skip_count_;
+                spdlog::warn(
+                    "ObsGuard[skip_position]: translation under-constrained "
+                    "(rank={}<{}, σ_t_min={:.3e}) — zeroed translation cols",
+                    obs_summary.translation_rank,
+                    observability_guard_.min_translation_rank,
+                    obs_summary.min_singular_translation);
+            }
+            break;
+        case ObservabilityGuardMode::kSkipUpdate:
+            if (obs_summary.translation_rank < observability_guard_.min_translation_rank) {
+                ekfom_data.valid = false;
+                ++obs_guard_skip_count_;
+                spdlog::warn(
+                    "ObsGuard[skip_update]: translation under-constrained "
+                    "(rank={}<{}, σ_t_min={:.3e}) — skipping IEKF update",
+                    obs_summary.translation_rank,
+                    observability_guard_.min_translation_rank,
+                    obs_summary.min_singular_translation);
+            }
+            break;
+    }
+
+    // ── NIS (filter-consistency diagnostic) ────────────────────────────
+    // For each accepted observation (row of ekfom_data.h_x), compute
+    //   NIS = r² / (H·P·Hᵀ + R)
+    // and aggregate per frame. Not a gate — purely a feedback signal for
+    // Q/R tuning. Mean NIS ≈ 1 ↔ filter Q+R are well-calibrated; ≪1 →
+    // underconfident (Q too big); ≫1 → overconfident. See nis.h for the
+    // theory and `butterfli data imu-characterize` for upstream tuning.
+    nis::NISAggregator nis_agg;
+    if (ekfom_data.valid) {
+        const Eigen::Matrix<double, 12, 12> P_nis = kf_.get_P().block<12, 12>(0, 0);
+        const double R_obs = options::LASER_POINT_COV;
+        const int nrows = static_cast<int>(ekfom_data.h_x.rows());
+        for (int i = 0; i < nrows; ++i) {
+            // Copy row into fixed-size type — ComputeScalarNIS expects
+            // Matrix<1,12>&, not a dynamic block expression.
+            Eigen::Matrix<double, 1, 12> h_row = ekfom_data.h_x.row(i);
+            nis_agg.Push(nis::ComputeScalarNIS(
+                static_cast<double>(ekfom_data.h(i)), h_row, P_nis, R_obs));
+        }
+    }
+    last_nis_count_ = nis_agg.count();
+    last_nis_mean_  = nis_agg.mean();
+    last_nis_max_   = nis_agg.max();
 }
 
 /////////////////////////////////////  debug save / show /////////////////////////////////////////////////////

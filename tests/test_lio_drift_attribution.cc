@@ -812,3 +812,122 @@ TEST(LioDriftAttribution, GateMode_Either_HoldsStationary) {
     EXPECT_LT(std::abs(s.ba.z()),  0.01);
     std::remove(yaml.c_str());
 }
+
+// ═════════════════════════════════════════════════════════════════════════
+// Observability-guard integration battery.
+//
+// Floor-only scan = translation rank 1 (only Z-normal plane present). At
+// min_translation_rank=3, every frame's jacobian fails the rank test — so
+// `skip_update` and `skip_position` both fire every frame, while `ignore`
+// stays silent. These tests pin the plumbing end-to-end:
+//   - skip_update   → guard count grows, pipeline survives 30s without crash.
+//   - skip_position → position columns zeroed, |pos| stays bounded.
+//   - ignore        → baseline, skip count stays 0 (regression canary).
+//
+// Note: the floor-only scan was already observed in
+// `Stationary_FloorOnly_PinsZOnly` to be too sparse for iVox k-NN(5) —
+// effective feature count may be 0 for many frames, so ObsModel short-
+// circuits before reaching the guard. The guard increments its skip count
+// only on frames where the jacobian is actually built (effect_feat_num_ ≥ 1),
+// which empirically fires a few times per run as the map populates. The
+// `> 0` assertion below captures exactly this: the guard runs AT LEAST ONCE
+// and correctly flags the scene as rank-deficient.
+// ═════════════════════════════════════════════════════════════════════════
+
+namespace {
+// YAML variant with an explicit observability_guard block.
+// `mode_str` ∈ {"ignore", "skip_position", "skip_update"}.
+std::string WriteTestYAMLWithObsGuard(const std::string& tag, const std::string& mode_str,
+                                       int min_translation_rank = 3,
+                                       double singular_threshold = 1.0e-4) {
+    const std::string path = std::string(ROOT_DIR) + "config/test_lio_" + tag + ".yaml";
+    std::ofstream f(path);
+    f << "common:\n  time_sync_en: false\n"
+      << "preprocess:\n  blind: 0.1\n"
+      << "mapping:\n"
+      << "  acc_cov: 0.1\n  gyr_cov: 0.1\n"
+      << "  b_acc_cov: 0.0001\n  b_gyr_cov: 0.0001\n"
+      << "  det_range: 100.0\n"
+      << "  extrinsic_est_en: false\n"
+      << "  extrinsic_T: [0, 0, 0]\n"
+      << "  extrinsic_R: [1, 0, 0, 0, 1, 0, 0, 0, 1]\n"
+      << "  observability_guard:\n"
+      << "    mode: " << mode_str << "\n"
+      << "    min_translation_rank: " << min_translation_rank << "\n"
+      << "    singular_threshold: " << singular_threshold << "\n"
+      << "imu_init:\n  motion_gate_enabled: false\n"
+      << "max_iteration: 4\n"
+      << "point_filter_num: 1\n"
+      << "filter_size_surf: 0.15\n"
+      << "filter_size_map: 0.15\n"
+      << "cube_side_length: 1000\n"
+      << "ivox_grid_resolution: 0.15\n"
+      << "ivox_nearby_type: 18\n"
+      << "esti_plane_threshold: 0.1\n"
+      << "map_quality_threshold: 0.0\n"
+      << "output:\n  path_en: false\n  dense_en: false\n  path_save_en: false\n"
+      << "pcd_save:\n  pcd_save_en: false\n  interval: -1\n";
+    return path;
+}
+}  // namespace
+
+TEST(LioDriftAttribution, ObsGuard_SkipUpdate_Floor_IncrementsSkipCount) {
+    const std::string yaml = WriteTestYAMLWithObsGuard("obsg_skip_upd", "skip_update");
+    LaserMapping mapping;
+    ASSERT_TRUE(mapping.Init(yaml));
+
+    // Floor only = translation rank 1 on every frame. With min_rank=3,
+    // every frame that builds a non-empty jacobian must trigger a skip.
+    auto scan = MakeRoomScan(kDropXneg | kDropXpos | kDropYneg | kDropYpos | kDropCeiling);
+    const Eigen::Vector3d accel(0, 0, kG);
+    const auto s = SimulateStationary(mapping, scan, accel, 30.0);
+    PrintState("ObsGuard=skip_update floor-only", s);
+
+    const int skips = mapping.ObsGuardSkipCount();
+    std::cerr << "  obs_guard_skip_count = " << skips << "\n";
+    EXPECT_GT(skips, 0)
+        << "skip_update should have fired at least once on a floor-only scan "
+        << "where translation rank is 1 < min_rank=3.";
+    std::remove(yaml.c_str());
+}
+
+TEST(LioDriftAttribution, ObsGuard_SkipPosition_Floor_StillProducesRotation) {
+    const std::string yaml = WriteTestYAMLWithObsGuard("obsg_skip_pos", "skip_position");
+    LaserMapping mapping;
+    ASSERT_TRUE(mapping.Init(yaml));
+
+    auto scan = MakeRoomScan(kDropXneg | kDropXpos | kDropYneg | kDropYpos | kDropCeiling);
+    const Eigen::Vector3d accel(0, 0, kG);
+    const auto s = SimulateStationary(mapping, scan, accel, 30.0);
+    PrintState("ObsGuard=skip_position floor-only", s);
+
+    const int skips = mapping.ObsGuardSkipCount();
+    std::cerr << "  obs_guard_skip_count = " << skips << "\n";
+    // Guard MUST have run on at least one post-init frame.
+    EXPECT_GT(skips, 0)
+        << "skip_position should fire on the same under-constrained frames as skip_update.";
+    // Pipeline didn't crash and |pos| stays bounded (floor-only stationary
+    // regime from `Stationary_FloorOnly_PinsZOnly` settles below 5 cm).
+    EXPECT_LT(s.pos.norm(), 0.20)
+        << "|pos| exceeded sanity bound — the skip_position gate may have destabilised the filter.";
+    std::remove(yaml.c_str());
+}
+
+TEST(LioDriftAttribution, ObsGuard_Ignore_Floor_NoIntervention) {
+    const std::string yaml = WriteTestYAMLWithObsGuard("obsg_ignore", "ignore");
+    LaserMapping mapping;
+    ASSERT_TRUE(mapping.Init(yaml));
+
+    auto scan = MakeRoomScan(kDropXneg | kDropXpos | kDropYneg | kDropYpos | kDropCeiling);
+    const Eigen::Vector3d accel(0, 0, kG);
+    const auto s = SimulateStationary(mapping, scan, accel, 30.0);
+    PrintState("ObsGuard=ignore floor-only (baseline)", s);
+
+    // Analyse-only mode must never increment the skip count.
+    EXPECT_EQ(mapping.ObsGuardSkipCount(), 0)
+        << "Ignore mode must be a pure analyse — any non-zero skip count is a regression.";
+    // Baseline drift should match the un-guarded floor-only run in
+    // `Stationary_FloorOnly_PinsZOnly`, bounded by the same 5 cm budget.
+    EXPECT_LT(std::abs(s.pos.z()), 0.05);
+    std::remove(yaml.c_str());
+}

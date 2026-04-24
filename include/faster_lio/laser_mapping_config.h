@@ -24,6 +24,7 @@
 
 #include "faster_lio/imu_processing.h"   // InitPDiag, DEFAULT_INIT_GATE_*
 #include "faster_lio/loop_closer.h"      // LoopCloser::Options
+#include "faster_lio/observability_guard.h"  // ObservabilityGuardMode
 #include "faster_lio/pose_graph.h"       // PoseGraph::Options
 
 namespace faster_lio {
@@ -54,6 +55,16 @@ struct OutlierGateSettings {
     double mahalanobis_chi2  = 6.63;  // χ² 1-DoF 99%
 };
 
+// Observability guard on the stacked per-frame LiDAR jacobian h_x. See
+// `observability_guard.h` for the detection logic; this struct pairs the
+// mode selector with its numeric knobs. The default (kIgnore) is a no-op —
+// the guard runs the analysis for diagnostics but doesn't gate the update.
+struct ObservabilityGuardSettings {
+    ObservabilityGuardMode mode = ObservabilityGuardMode::kIgnore;   // no-op default
+    int min_translation_rank = 3;     // full rank required to consider "observable"
+    double singular_threshold = 1.0e-4;  // absolute σ threshold on info matrix
+};
+
 // Mapping / IEKF hyperparameters that don't belong to a nested struct.
 struct MappingSettings {
     float  det_range             = 300.0f;
@@ -67,6 +78,7 @@ struct MappingSettings {
     // → options::DEFAULT_LASER_POINT_COV is used (preserves legacy tuning).
     std::optional<double> laser_point_cov;
     OutlierGateSettings outlier_gate{};
+    ObservabilityGuardSettings observability_guard{};
 };
 
 // LiDAR pose in IMU frame + online refinement flag.

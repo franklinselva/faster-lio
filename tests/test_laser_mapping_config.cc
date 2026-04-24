@@ -414,3 +414,68 @@ TEST(LaserMappingConfigParser, OutlierGate_UnknownModeFails) {
     EXPECT_FALSE(ParseLaserMappingConfig(LoadYAML(yaml), cfg))
         << "Unknown gate mode should fail cleanly with a message naming the valid options.";
 }
+
+// ═════════════════════════════════════════════════════════════════════════
+// I. Observability-guard block — optional; struct defaults = ignore/no-op.
+// ═════════════════════════════════════════════════════════════════════════
+
+TEST(LaserMappingConfigParser, ObservabilityGuard_DefaultsAreIgnore) {
+    LaserMappingConfig cfg;
+    ASSERT_TRUE(ParseLaserMappingConfig(LoadYAML(MinimalYAML()), cfg));
+    EXPECT_EQ       (cfg.mapping.observability_guard.mode, ObservabilityGuardMode::kIgnore);
+    EXPECT_EQ       (cfg.mapping.observability_guard.min_translation_rank, 3);
+    EXPECT_DOUBLE_EQ(cfg.mapping.observability_guard.singular_threshold,   1.0e-4);
+}
+
+// Parameterised over the three modes. We can't use TEST_P cleanly without
+// a fixture, so just iterate the modes inside a single test body — GTest
+// failure messages still include the mode string via SCOPED_TRACE.
+TEST(LaserMappingConfigParser, ObservabilityGuard_EachModeParsed) {
+    struct Case {
+        const char *yaml_name;
+        ObservabilityGuardMode expected;
+    };
+    const Case cases[] = {
+        {"ignore",        ObservabilityGuardMode::kIgnore},
+        {"skip_position", ObservabilityGuardMode::kSkipPosition},
+        {"skip_update",   ObservabilityGuardMode::kSkipUpdate},
+    };
+    for (const auto &c : cases) {
+        SCOPED_TRACE(c.yaml_name);
+        auto yaml = MinimalYAML();
+        const auto pos = yaml.find("det_range: 100.0");
+        yaml.insert(pos + std::string("det_range: 100.0\n").size(),
+                    std::string("  observability_guard:\n    mode: ") + c.yaml_name + "\n");
+
+        LaserMappingConfig cfg;
+        ASSERT_TRUE(ParseLaserMappingConfig(LoadYAML(yaml), cfg));
+        EXPECT_EQ(cfg.mapping.observability_guard.mode, c.expected);
+    }
+}
+
+TEST(LaserMappingConfigParser, ObservabilityGuard_UnknownModeFails) {
+    auto yaml = MinimalYAML();
+    const auto pos = yaml.find("det_range: 100.0");
+    yaml.insert(pos + std::string("det_range: 100.0\n").size(),
+                "  observability_guard:\n    mode: hallelujah\n");
+
+    LaserMappingConfig cfg;
+    EXPECT_FALSE(ParseLaserMappingConfig(LoadYAML(yaml), cfg))
+        << "Unknown observability_guard mode must fail with the three valid options named.";
+}
+
+TEST(LaserMappingConfigParser, ObservabilityGuard_ThresholdOverride) {
+    auto yaml = MinimalYAML();
+    const auto pos = yaml.find("det_range: 100.0");
+    yaml.insert(pos + std::string("det_range: 100.0\n").size(),
+                "  observability_guard:\n"
+                "    mode: skip_position\n"
+                "    min_translation_rank: 2\n"
+                "    singular_threshold: 5.0e-3\n");
+
+    LaserMappingConfig cfg;
+    ASSERT_TRUE(ParseLaserMappingConfig(LoadYAML(yaml), cfg));
+    EXPECT_EQ       (cfg.mapping.observability_guard.mode, ObservabilityGuardMode::kSkipPosition);
+    EXPECT_EQ       (cfg.mapping.observability_guard.min_translation_rank, 2);
+    EXPECT_DOUBLE_EQ(cfg.mapping.observability_guard.singular_threshold,   5.0e-3);
+}

@@ -209,6 +209,46 @@ class LaserMapping {
     float esti_plane_threshold_ = 0.1f;
     float map_quality_threshold_ = 0.0f;  // 0 = disabled; points with fit_quality > this are excluded from map
     OutlierGateSettings outlier_gate_{};   // per-point outlier-rejection config (see outlier_gate.h)
+
+    // Observability guard on the stacked per-frame jacobian h_x. See
+    // `observability_guard.h` for the detection logic. Default mode
+    // (kIgnore) is analyse-only; kSkipPosition / kSkipUpdate gate the
+    // IEKF update when translation rank is below min_translation_rank.
+    ObservabilityGuardSettings observability_guard_{};
+    int    last_obs_translation_rank_       = 0;
+    int    last_obs_rotation_rank_          = 0;
+    double last_obs_min_singular_translation_ = 0.0;
+    int    obs_guard_skip_count_            = 0;
+
+    // Filter-consistency diagnostic (NIS = Normalized Innovation Squared).
+    // Computed per frame from accepted LiDAR observations after the
+    // jacobian is built. Mean NIS should be ~1 for a well-calibrated
+    // filter — ≪1 indicates Q too large (filter underconfident); ≫1
+    // indicates Q too small (filter overconfident → risk of divergence).
+    // See faster_lio/nis.h for the math.
+    int    last_nis_count_ = 0;
+    double last_nis_mean_  = 0.0;
+    double last_nis_max_   = 0.0;
+
+   public:
+    // Diagnostics accessors for the observability guard — read-only snapshots
+    // of the most recent ObsModel analysis. Stable between LaserMapping::Run()
+    // ticks. Intended for integration tests and live diagnostics; the hot
+    // path should still use GetFilterState / GetCurrentPose.
+    int    LastObsTranslationRank()        const { return last_obs_translation_rank_; }
+    int    LastObsRotationRank()           const { return last_obs_rotation_rank_; }
+    double LastObsMinSingularTranslation() const { return last_obs_min_singular_translation_; }
+    int    ObsGuardSkipCount()             const { return obs_guard_skip_count_; }
+
+    // NIS (filter consistency) accessors — same per-frame snapshot contract
+    // as the observability guard accessors above. `LastNISCount()` == 0
+    // means either no observations were accepted this frame OR ObsModel
+    // hasn't run yet; mean/max are only meaningful when count > 0.
+    int    LastNISCount() const { return last_nis_count_; }
+    double LastNISMean()  const { return last_nis_mean_; }
+    double LastNISMax()   const { return last_nis_max_; }
+
+   private:
     bool time_sync_en_ = false;
     double timediff_lidar_wrt_imu_ = 0.0;
     double last_timestamp_lidar_ = 0;
