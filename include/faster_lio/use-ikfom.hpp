@@ -34,15 +34,24 @@ MTK_BUILD_MANIFOLD(input_ikfom, ((vect3, acc))((vect3, gyro)));
 
 MTK_BUILD_MANIFOLD(process_noise_ikfom, ((vect3, ng))((vect3, na))((vect3, nbg))((vect3, nba)));
 
-inline MTK::get_cov<process_noise_ikfom>::type process_noise_cov() {
+// NOTE (fork-specific): in this codebase ImuProcess rebuilds the 12x12 Q_
+// used by kf.predict() from its runtime covariance members (cov_gyr_,
+// cov_acc_, cov_bias_gyr_, cov_bias_acc_ — see ImuProcess::RebuildQ()).
+// Those members are populated from YAML `mapping.{gyr,acc,b_gyr,b_acc}_cov`.
+// The upstream FAST-LIO defaults previously baked into this helper never
+// reached a predict() call, so the numeric diagonals were misleading.
+//
+// The helper is kept with parameterized overloads for downstream callers
+// that construct a process-noise cov directly (the state / input manifolds
+// still live here). Default arguments reproduce the upstream literals so
+// external callers see no behavior change.
+inline MTK::get_cov<process_noise_ikfom>::type process_noise_cov(double ng = 1.0e-4, double na = 1.0e-4,
+                                                                 double nbg = 1.0e-5, double nba = 1.0e-5) {
     MTK::get_cov<process_noise_ikfom>::type cov = MTK::get_cov<process_noise_ikfom>::type::Zero();
-    MTK::setDiagonal<process_noise_ikfom, vect3, 0>(cov, &process_noise_ikfom::ng, 0.0001);  // 0.03
-    MTK::setDiagonal<process_noise_ikfom, vect3, 3>(cov, &process_noise_ikfom::na,
-                                                    0.0001);  // *dt 0.01 0.01 * dt * dt 0.05
-    MTK::setDiagonal<process_noise_ikfom, vect3, 6>(cov, &process_noise_ikfom::nbg,
-                                                    0.00001);  // *dt 0.00001 0.00001 * dt *dt 0.3 //0.001 0.0001 0.01
-    MTK::setDiagonal<process_noise_ikfom, vect3, 9>(cov, &process_noise_ikfom::nba,
-                                                    0.00001);  // 0.001 0.05 0.0001/out 0.01
+    MTK::setDiagonal<process_noise_ikfom, vect3, 0>(cov, &process_noise_ikfom::ng, ng);
+    MTK::setDiagonal<process_noise_ikfom, vect3, 3>(cov, &process_noise_ikfom::na, na);
+    MTK::setDiagonal<process_noise_ikfom, vect3, 6>(cov, &process_noise_ikfom::nbg, nbg);
+    MTK::setDiagonal<process_noise_ikfom, vect3, 9>(cov, &process_noise_ikfom::nba, nba);
     return cov;
 }
 

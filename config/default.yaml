@@ -13,12 +13,20 @@ common:
 preprocess:
   blind: 0.5                   # discard points within this range (m)
 
+# ── Process-noise densities (IEKF Q_) ──────────────────────────────────
+# These drive the 12×12 process-noise covariance passed to each predict()
+# step. Despite the legacy `mapping.*_cov` names, they are NOT measurement
+# covariances — they are the white-noise densities on gyro, accel, and
+# their bias random walks. Names here match `process_noise_ikfom` in
+# use-ikfom.hpp so the link to the IEKF state equation is explicit.
+process_noise:
+  ng:  0.1                     # gyroscope white noise (rad/s²/Hz)
+  na:  0.1                     # accelerometer white noise (m/s²²/Hz)
+  nbg: 0.0001                  # gyroscope bias random walk
+  nba: 0.0001                  # accelerometer bias random walk
+
 # ── IEKF state estimation ──────────────────────────────────────────────
 mapping:
-  acc_cov: 0.1                 # accelerometer process noise (m/s²²/Hz)
-  gyr_cov: 0.1                 # gyroscope process noise (rad/s²/Hz)
-  b_acc_cov: 0.0001            # accelerometer bias random walk
-  b_gyr_cov: 0.0001            # gyroscope bias random walk
   det_range: 100.0             # max LiDAR range used for matching (m)
   extrinsic_est_en: true       # online refinement of LiDAR↔IMU extrinsic
 
@@ -41,8 +49,12 @@ imu_init:
   motion_gate_enabled: false   # set true to harden init (see below)
   acc_rel_thresh: 0.05         # |‖cur_acc‖ − ‖mean_acc‖| / ‖mean_acc‖
   gyr_thresh: 0.05             # rad/s max ‖cur_gyr‖
-  min_accepted: 50             # samples that pass the gate before init completes
-  max_tries: 1000              # ~5 s fail-soft cap at 200 Hz IMU
+  # Preferred: time-based window (rate-independent). Resolved to sample
+  # counts from the IMU rate measured on the first batch. Legacy
+  # `min_accepted` / `max_tries` (sample counts) still work and take
+  # precedence when present.
+  min_time_s: 0.5              # ≥ this much static signal before init completes
+  max_time_s: 5.0              # fail-soft cap
 
 # ── Wheel odometry fusion ──────────────────────────────────────────────
 # Optional body-frame velocity observations applied as sequential scalar

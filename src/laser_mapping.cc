@@ -81,10 +81,54 @@ bool LaserMapping::LoadParamsFromYAML(const std::string &yaml_file) {
         filter_size_map_min_ = yaml["filter_size_map"].as<float>();
         cube_len_ = yaml["cube_side_length"].as<int>();
         det_range_ = yaml["mapping"]["det_range"].as<float>();
-        gyr_cov = yaml["mapping"]["gyr_cov"].as<float>();
-        acc_cov = yaml["mapping"]["acc_cov"].as<float>();
-        b_gyr_cov = yaml["mapping"]["b_gyr_cov"].as<float>();
-        b_acc_cov = yaml["mapping"]["b_acc_cov"].as<float>();
+
+        // Process-noise densities that populate the IEKF Q_ diagonal.
+        //
+        // Preferred: `process_noise: {ng, na, nbg, nba}` — matches the
+        //   manifold names in use-ikfom.hpp and the semantics
+        //   (gyro/accel white-noise + their bias random walks).
+        // Legacy:    `mapping.{gyr_cov, acc_cov, b_gyr_cov, b_acc_cov}` —
+        //   upstream FAST-LIO names. Misleading because "cov" suggests
+        //   measurement covariance, but these ARE the process-noise
+        //   densities (live in Q_ via predict).
+        //
+        // Back-compat: both key groups work. `process_noise` wins if
+        // both are present. Missing both is an error.
+        {
+            const bool has_new = static_cast<bool>(yaml["process_noise"]);
+            const bool has_legacy = yaml["mapping"] && yaml["mapping"]["gyr_cov"];
+            if (!has_new && !has_legacy) {
+                spdlog::error("No process-noise config found: YAML must define either "
+                              "`process_noise: {{ng, na, nbg, nba}}` (preferred) or legacy "
+                              "`mapping.{{gyr_cov, acc_cov, b_gyr_cov, b_acc_cov}}`");
+                return false;
+            }
+            if (has_new && has_legacy) {
+                spdlog::warn("Both `process_noise` and legacy `mapping.*_cov` keys present; "
+                             "using `process_noise` (preferred). Remove legacy keys to silence.");
+            }
+            if (has_legacy && !has_new) {
+                spdlog::warn("Using deprecated `mapping.{{gyr,acc,b_gyr,b_acc}}_cov` YAML keys. "
+                             "Migrate to `process_noise: {{ng, na, nbg, nba}}` — these are "
+                             "process-noise densities, not measurement covariances.");
+            }
+            // Per-field fallback so a partial `process_noise` block inherits
+            // matching legacy keys (if any) rather than silently flipping
+            // fields to 0. Missing entirely → struct defaults below.
+            auto read = [&](const char *new_key, const char *legacy_key, float fallback) -> float {
+                if (has_new && yaml["process_noise"][new_key]) {
+                    return yaml["process_noise"][new_key].as<float>();
+                }
+                if (has_legacy && yaml["mapping"][legacy_key]) {
+                    return yaml["mapping"][legacy_key].as<float>();
+                }
+                return fallback;
+            };
+            gyr_cov   = read("ng",  "gyr_cov",   0.1f);
+            acc_cov   = read("na",  "acc_cov",   0.1f);
+            b_gyr_cov = read("nbg", "b_gyr_cov", 1.0e-4f);
+            b_acc_cov = read("nba", "b_acc_cov", 1.0e-4f);
+        }
 
         // LiDAR point-to-plane measurement covariance (optional; preserves
         // baseline when absent). Raise when filter is overconfident
@@ -142,16 +186,70 @@ bool LaserMapping::LoadParamsFromYAML(const std::string &yaml_file) {
 
     // Optional: motion-gated IMU init. If the yaml block is absent, legacy
     // behavior is preserved (MAX_INI_COUNT=20 samples, no gating).
+    //
+    // Two configuration modes:
+    //   a) Explicit sample counts: `min_accepted` / `max_tries`. Precise
+    //      but rate-dependent — 100 samples = 0.5 s at 200 Hz but 0.25 s
+    //      at 400 Hz. Kept for legacy configs and test determinism.
+    //   b) Time-based (preferred default): `min_time_s` / `max_time_s`.
+    //      Sample counts resolved from the IMU rate measured on the first
+    //      IMUInit batch. Works the same across 100 / 200 / 400 Hz IMUs.
+    //
+    // Precedence: ANY count key present → count mode (for the present
+    // field); absent fields fall back to legacy count defaults. No count
+    // keys → time mode with configurable time or default 0.5 s / 5.0 s.
     if (yaml["imu_init"]) {
         const auto &ii = yaml["imu_init"];
         const bool en = ii["motion_gate_enabled"] ? ii["motion_gate_enabled"].as<bool>() : false;
         const double acc_rel_thresh = ii["acc_rel_thresh"] ? ii["acc_rel_thresh"].as<double>() : 0.05;
         const double gyr_thresh = ii["gyr_thresh"] ? ii["gyr_thresh"].as<double>() : 0.05;
-        const int min_accepted = ii["min_accepted"] ? ii["min_accepted"].as<int>() : DEFAULT_INIT_GATE_MIN_ACCEPTED;
-        const int max_tries = ii["max_tries"] ? ii["max_tries"].as<int>() : DEFAULT_INIT_GATE_MAX_TRIES;
-        p_imu_->SetInitMotionGate(en, acc_rel_thresh, gyr_thresh, min_accepted, max_tries);
+
+        const bool has_count_min = static_cast<bool>(ii["min_accepted"]);
+        const bool has_count_max = static_cast<bool>(ii["max_tries"]);
+        const bool has_time_min  = static_cast<bool>(ii["min_time_s"]);
+        const bool has_time_max  = static_cast<bool>(ii["max_time_s"]);
+        const bool has_any_count = has_count_min || has_count_max;
+        const bool has_any_time  = has_time_min  || has_time_max;
+
+        if (has_any_count && has_any_time) {
+            spdlog::warn("Both sample-count (min_accepted/max_tries) and time-based "
+                         "(min_time_s/max_time_s) init-gate keys present in YAML; "
+                         "using sample counts (remove the time keys to silence).");
+        }
+
+        if (has_any_count) {
+            const int min_accepted = has_count_min ? ii["min_accepted"].as<int>()
+                                                   : DEFAULT_INIT_GATE_MIN_ACCEPTED;
+            const int max_tries    = has_count_max ? ii["max_tries"].as<int>()
+                                                   : DEFAULT_INIT_GATE_MAX_TRIES;
+            p_imu_->SetInitMotionGate(en, acc_rel_thresh, gyr_thresh, min_accepted, max_tries);
+        } else {
+            const double min_time_s = has_time_min ? ii["min_time_s"].as<double>()
+                                                   : DEFAULT_INIT_GATE_MIN_TIME_S;
+            const double max_time_s = has_time_max ? ii["max_time_s"].as<double>()
+                                                   : DEFAULT_INIT_GATE_MAX_TIME_S;
+            p_imu_->SetInitMotionGateTime(en, acc_rel_thresh, gyr_thresh, min_time_s, max_time_s);
+        }
         const bool assume_level = ii["assume_level"] ? ii["assume_level"].as<bool>() : false;
         p_imu_->SetInitAssumeLevel(assume_level);
+
+        // Optional: initial Kalman covariance diagonal. Missing block OR
+        // missing fields fall back to InitPDiag's struct defaults, which
+        // reproduce the upstream FAST-LIO hard-coded init_P byte-for-byte.
+        // Negative / zero / NaN values are clamped by SetInitPDiag.
+        if (ii["init_P_diag"]) {
+            const auto &p = ii["init_P_diag"];
+            InitPDiag ip;  // struct defaults = legacy values
+            if (p["pos"])       ip.pos       = p["pos"].as<double>();
+            if (p["rot"])       ip.rot       = p["rot"].as<double>();
+            if (p["off_R_L_I"]) ip.off_R_L_I = p["off_R_L_I"].as<double>();
+            if (p["off_T_L_I"]) ip.off_T_L_I = p["off_T_L_I"].as<double>();
+            if (p["vel"])       ip.vel       = p["vel"].as<double>();
+            if (p["bg"])        ip.bg        = p["bg"].as<double>();
+            if (p["ba"])        ip.ba        = p["ba"].as<double>();
+            if (p["grav"])      ip.grav      = p["grav"].as<double>();
+            p_imu_->SetInitPDiag(ip);
+        }
     }
 
     // Optional: pose-graph optimization backend. Off by default.
@@ -327,6 +425,10 @@ void LaserMapping::AddWheelOdom(const WheelOdomData &odom) {
 PoseStamped LaserMapping::GetCurrentPose() const {
     std::lock_guard<std::mutex> lock(mtx_state_);
     return msg_body_pose_;
+}
+
+bool LaserMapping::IsImuInitialized() const {
+    return p_imu_ && p_imu_->Initialized();
 }
 
 state_ikfom LaserMapping::GetFilterState() const {

@@ -9,11 +9,16 @@ bool time_list(const PointType &x, const PointType &y) { return (x.curvature < y
 
 ImuProcess::ImuProcess() : b_first_frame_(true), imu_need_init_(true) {
     init_iter_num_ = 1;
-    Q_ = process_noise_cov();
     cov_acc_ = common::V3D(0.1, 0.1, 0.1);
     cov_gyr_ = common::V3D(0.1, 0.1, 0.1);
     cov_bias_gyr_ = common::V3D(0.0001, 0.0001, 0.0001);
     cov_bias_acc_ = common::V3D(0.0001, 0.0001, 0.0001);
+    // Build Q_ from the cov_* defaults rather than the stale upstream
+    // literals in process_noise_cov(). Q_ was previously initialized here
+    // and then unconditionally overwritten inside UndistortPcl every scan;
+    // the new invariant is that RebuildQ() is the single writer, called
+    // here, from bias-cov setters, and at the end of init-complete.
+    RebuildQ();
     mean_acc_ = common::V3D(0, 0, -1.0);
     mean_gyr_ = common::V3D(0, 0, 0);
     angvel_last_ = common::Zero3d;
@@ -36,6 +41,14 @@ void ImuProcess::Reset() {
     IMUpose_.clear();
     last_imu_ = std::make_shared<IMUData>();
     cur_pcl_un_ = std::make_shared<PointCloudType>();
+    // If the gate was configured by TIME, the resolved sample counts are
+    // derived from the measured IMU rate; invalidate them so the next
+    // IMUInit batch re-estimates the rate. Explicit-count callers keep
+    // their values (init_min_time_s_ stays ≤0 for that path).
+    if (init_min_time_s_ > 0) {
+        init_counts_resolved_ = false;
+        init_estimated_rate_hz_ = 0.0;
+    }
 }
 
 void ImuProcess::SetExtrinsic(const common::V3D &transl, const common::M3D &rot) {
@@ -47,9 +60,55 @@ void ImuProcess::SetGyrCov(const common::V3D &scaler) { cov_gyr_scale_ = scaler;
 
 void ImuProcess::SetAccCov(const common::V3D &scaler) { cov_acc_scale_ = scaler; }
 
-void ImuProcess::SetGyrBiasCov(const common::V3D &b_g) { cov_bias_gyr_ = b_g; }
+// SetGyrBiasCov / SetAccBiasCov assign directly to cov_bias_gyr_ /
+// cov_bias_acc_ (not to a scale buffer) because those values are consumed
+// straight by Q_ at runtime. Keep Q_ in sync here so the filter sees the
+// new bias covariance on the next predict() without waiting for init to
+// complete.
+void ImuProcess::SetGyrBiasCov(const common::V3D &b_g) {
+    cov_bias_gyr_ = b_g;
+    RebuildQ();
+}
 
-void ImuProcess::SetAccBiasCov(const common::V3D &b_a) { cov_bias_acc_ = b_a; }
+void ImuProcess::SetAccBiasCov(const common::V3D &b_a) {
+    cov_bias_acc_ = b_a;
+    RebuildQ();
+}
+
+void ImuProcess::RebuildQ() {
+    Q_.setZero();
+    Q_.block<3, 3>(0, 0).diagonal() = cov_gyr_;
+    Q_.block<3, 3>(3, 3).diagonal() = cov_acc_;
+    Q_.block<3, 3>(6, 6).diagonal() = cov_bias_gyr_;
+    Q_.block<3, 3>(9, 9).diagonal() = cov_bias_acc_;
+}
+
+void ImuProcess::SetInitPDiag(const InitPDiag &ip) {
+    // Covariance diagonals must be strictly positive. Clamp to a tiny
+    // floor rather than reject outright so malformed YAML doesn't abort
+    // the whole pipeline (already a warning surface above).
+    constexpr double kFloor = 1.0e-12;
+    const auto sanitize = [kFloor](double v, const char *field) -> double {
+        if (!std::isfinite(v) || v < kFloor) {
+            spdlog::warn("InitPDiag.{} = {:.3e} is non-finite or below floor {:.0e}; clamping to floor",
+                         field, v, kFloor);
+            return kFloor;
+        }
+        return v;
+    };
+    init_P_diag_.pos       = sanitize(ip.pos,       "pos");
+    init_P_diag_.rot       = sanitize(ip.rot,       "rot");
+    init_P_diag_.off_R_L_I = sanitize(ip.off_R_L_I, "off_R_L_I");
+    init_P_diag_.off_T_L_I = sanitize(ip.off_T_L_I, "off_T_L_I");
+    init_P_diag_.vel       = sanitize(ip.vel,       "vel");
+    init_P_diag_.bg        = sanitize(ip.bg,        "bg");
+    init_P_diag_.ba        = sanitize(ip.ba,        "ba");
+    init_P_diag_.grav      = sanitize(ip.grav,      "grav");
+    spdlog::info("IMU init P diag set: pos={:.2e} rot={:.2e} off_R={:.2e} off_T={:.2e} "
+                 "vel={:.2e} bg={:.2e} ba={:.2e} grav={:.2e}",
+                 init_P_diag_.pos, init_P_diag_.rot, init_P_diag_.off_R_L_I, init_P_diag_.off_T_L_I,
+                 init_P_diag_.vel, init_P_diag_.bg, init_P_diag_.ba, init_P_diag_.grav);
+}
 
 void ImuProcess::SetInitMotionGate(bool enabled, double acc_rel_thresh, double gyr_thresh,
                                    int min_accepted, int max_tries) {
@@ -58,10 +117,31 @@ void ImuProcess::SetInitMotionGate(bool enabled, double acc_rel_thresh, double g
     init_gyr_thresh_ = gyr_thresh;
     init_min_accepted_ = std::max(1, min_accepted);
     init_max_tries_ = std::max(init_min_accepted_, max_tries);
+    // Explicit counts bypass the time-based resolution path.
+    init_min_time_s_ = -1.0;
+    init_max_time_s_ = -1.0;
+    init_counts_resolved_ = true;
     if (enabled) {
-        spdlog::info("IMU init motion-gate ENABLED: acc_rel_thresh={:.4f} (|Δ‖a‖|/‖a‖), "
+        spdlog::info("IMU init motion-gate ENABLED (samples): acc_rel_thresh={:.4f} (|Δ‖a‖|/‖a‖), "
                      "gyr_thresh={:.4f} rad/s, min_accepted={}, max_tries={}",
                      acc_rel_thresh, gyr_thresh, init_min_accepted_, init_max_tries_);
+    }
+}
+
+void ImuProcess::SetInitMotionGateTime(bool enabled, double acc_rel_thresh, double gyr_thresh,
+                                       double min_time_s, double max_time_s) {
+    init_gate_enabled_ = enabled;
+    init_acc_rel_thresh_ = acc_rel_thresh;
+    init_gyr_thresh_ = gyr_thresh;
+    // Clamp to sane lower bounds; the rate-based resolution happens later.
+    init_min_time_s_ = std::max(1.0e-3, min_time_s);
+    init_max_time_s_ = std::max(init_min_time_s_, max_time_s);
+    init_counts_resolved_ = false;  // will compute from rate on first batch
+    if (enabled) {
+        spdlog::info("IMU init motion-gate ENABLED (time): acc_rel_thresh={:.4f} (|Δ‖a‖|/‖a‖), "
+                     "gyr_thresh={:.4f} rad/s, min_time_s={:.3f}, max_time_s={:.3f} (counts "
+                     "resolved on first IMU batch)",
+                     acc_rel_thresh, gyr_thresh, init_min_time_s_, init_max_time_s_);
     }
 }
 
@@ -85,6 +165,33 @@ void ImuProcess::IMUInit(const common::MeasureGroup &meas, esekfom::esekf<state_
         const auto &gyr_acc = meas.imu_.front()->angular_velocity;
         mean_acc_ << imu_acc.x(), imu_acc.y(), imu_acc.z();
         mean_gyr_ << gyr_acc.x(), gyr_acc.y(), gyr_acc.z();
+    }
+
+    // Rate-adaptive counts: if the gate was configured by time, resolve
+    // sample counts from the measured IMU rate on the first batch that
+    // has ≥ 2 samples over a non-zero interval. Falls back to 200 Hz
+    // otherwise (preserving the legacy hard-coded count behaviour).
+    if (!init_counts_resolved_ && init_min_time_s_ > 0) {
+        double rate_hz = DEFAULT_IMU_RATE_HZ_FALLBACK;
+        if (meas.imu_.size() >= 2) {
+            const double t_first = meas.imu_.front()->timestamp;
+            const double t_last  = meas.imu_.back()->timestamp;
+            const double dur = t_last - t_first;
+            if (dur > 1.0e-6) {
+                rate_hz = static_cast<double>(meas.imu_.size() - 1) / dur;
+            }
+        }
+        init_estimated_rate_hz_ = rate_hz;
+        init_min_accepted_ =
+            std::max(1, static_cast<int>(std::round(init_min_time_s_ * rate_hz)));
+        init_max_tries_ = std::max(
+            init_min_accepted_,
+            static_cast<int>(std::round(init_max_time_s_ * rate_hz)));
+        init_counts_resolved_ = true;
+        spdlog::info("IMU init gate resolved (rate={:.1f} Hz, first batch): "
+                     "min_accepted={} ({:.3f}s × rate), max_tries={} ({:.3f}s × rate)",
+                     rate_hz, init_min_accepted_, init_min_time_s_,
+                     init_max_tries_, init_max_time_s_);
     }
 
     for (const auto &imu : meas.imu_) {
@@ -137,13 +244,19 @@ void ImuProcess::IMUInit(const common::MeasureGroup &meas, esekfom::esekf<state_
     init_state.offset_R_L_I = Lidar_R_wrt_IMU_;
     kf_state.change_x(init_state);
 
+    // Initial covariance — fully diagonal, driven by init_P_diag_. The
+    // defaults reproduce the upstream FAST-LIO hard-coded values exactly;
+    // override via SetInitPDiag() / YAML imu_init.init_P_diag.
     esekfom::esekf<state_ikfom, 12, input_ikfom>::cov init_P = kf_state.get_P();
-    init_P.setIdentity();
-    init_P(6, 6) = init_P(7, 7) = init_P(8, 8) = 0.00001;
-    init_P(9, 9) = init_P(10, 10) = init_P(11, 11) = 0.00001;
-    init_P(15, 15) = init_P(16, 16) = init_P(17, 17) = 0.0001;
-    init_P(18, 18) = init_P(19, 19) = init_P(20, 20) = 0.001;
-    init_P(21, 21) = init_P(22, 22) = 0.00001;
+    init_P.setZero();
+    for (int i = 0;  i < 3;  ++i) init_P(i, i) = init_P_diag_.pos;
+    for (int i = 3;  i < 6;  ++i) init_P(i, i) = init_P_diag_.rot;
+    for (int i = 6;  i < 9;  ++i) init_P(i, i) = init_P_diag_.off_R_L_I;
+    for (int i = 9;  i < 12; ++i) init_P(i, i) = init_P_diag_.off_T_L_I;
+    for (int i = 12; i < 15; ++i) init_P(i, i) = init_P_diag_.vel;
+    for (int i = 15; i < 18; ++i) init_P(i, i) = init_P_diag_.bg;
+    for (int i = 18; i < 21; ++i) init_P(i, i) = init_P_diag_.ba;
+    for (int i = 21; i < 23; ++i) init_P(i, i) = init_P_diag_.grav;
     kf_state.change_P(init_P);
     last_imu_ = meas.imu_.back();
 }
@@ -201,10 +314,9 @@ void ImuProcess::UndistortPcl(const common::MeasureGroup &meas, esekfom::esekf<s
 
         in.acc = acc_avr;
         in.gyro = angvel_avr;
-        Q_.block<3, 3>(0, 0).diagonal() = cov_gyr_;
-        Q_.block<3, 3>(3, 3).diagonal() = cov_acc_;
-        Q_.block<3, 3>(6, 6).diagonal() = cov_bias_gyr_;
-        Q_.block<3, 3>(9, 9).diagonal() = cov_bias_acc_;
+        // Q_ is maintained by RebuildQ() (ctor + bias-cov setters +
+        // end-of-init). No per-frame rebuild is needed; the cov_* members
+        // do not change inside UndistortPcl.
         kf_state.predict(dt, Q_, in);
 
         /* save the poses at each IMU measurements */
@@ -339,11 +451,19 @@ void ImuProcess::Process(const common::MeasureGroup &meas, esekfom::esekf<state_
         }
 
         if (complete) {
-            cov_acc_ *= pow(common::G_m_s2 / mean_acc_.norm(), 2);
+            // Dead code removed: `cov_acc_ *= pow(G/|mean_acc|, 2)` used to
+            // live here, but cov_acc_ is immediately overwritten by
+            // cov_acc_scale_ two lines below, so the rescale never reached
+            // Q_ or any predict call. (Leftover from FAST-LIO upstream
+            // before the *_scale_ indirection was added.)
             imu_need_init_ = false;
 
             cov_acc_ = cov_acc_scale_;
             cov_gyr_ = cov_gyr_scale_;
+            // Now that cov_acc_ / cov_gyr_ hold the runtime (YAML-scale)
+            // values, refresh Q_ so the first post-init predict() sees
+            // the right process-noise diagonal.
+            RebuildQ();
 
             // One-shot proper leveling: apply body→world rotation from the
             // final (gated, stable) mean_acc direction, so the first post-init

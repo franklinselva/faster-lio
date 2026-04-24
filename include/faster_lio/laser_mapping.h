@@ -44,6 +44,14 @@ class LaserMapping {
     /// Returns true if Init() has been successfully called.
     bool IsInitialized() const { return initialized_; }
 
+    /// True once the IMU initialization (gravity alignment, bias warm-up)
+    /// has completed AND the IEKF has produced at least one post-init pose.
+    /// Until this returns true, `GetCurrentPose()` returns an uninitialized
+    /// pose that shouldn't be logged or published — doing so pins the
+    /// visualization's base_link at the world origin for the first ~2 s of
+    /// the run, which looks like a timestamp jump in the viewer.
+    bool IsImuInitialized() const;
+
     /// Run one iteration of the mapping pipeline.
     /// Must be called from a single thread. NOT re-entrant.
     void Run();
@@ -70,6 +78,11 @@ class LaserMapping {
     /// extrinsic). Intended for test instrumentation — the live pipeline
     /// should use GetCurrentPose / GetCurrentOdometry instead.
     state_ikfom GetFilterState() const;
+
+    /// Read-only view of the embedded ImuProcess. Intended purely for test
+    /// instrumentation (e.g. verifying that YAML keys landed on the IMU
+    /// preprocessor's configuration). Never null post-Init().
+    const ImuProcess *GetImuProcess() const { return p_imu_.get(); }
 
     /// Get a copy of the latest undistorted scan (body frame).
     CloudPtr GetUndistortedCloud() const;
